@@ -9,10 +9,14 @@ import asyncio
 import socket
 from telegram_monitor import TelegramMonitor
 
-# === Настройки ===
+# === Настройки (ОБЯЗАТЕЛЬНО ИЗ ENV) ===
 DATA_FILE = "dashboat_data.json"
-API_ID = int(os.environ.get("API_ID", "24777032"))
-API_HASH = os.environ.get("API_HASH", "12da668ad167c903820f8899ea202158")
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+
+if not API_ID or not API_HASH:
+    print("[ОШИБКА] Установите API_ID и API_HASH в Render → Environment")
+    exit(1)
 
 monitor_instance = None
 monitor_thread = None
@@ -28,8 +32,8 @@ def load_data():
                 if "groups" in data:
                     data["groups"] = [str(g).strip() for g in data["groups"]]
                 return data
-        except json.JSONDecodeError:
-            return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
+        except Exception as e:
+            print(f"[ОШИБКА] JSON: {e}")
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
 
 
@@ -56,7 +60,7 @@ def run_monitor_async(api_id, api_hash, keywords, groups):
     asyncio.set_event_loop(monitor_loop)
 
     try:
-        print(f"\n[MONITOR] Создаю TelegramMonitor...")
+        print("[MONITOR] Создаю TelegramMonitor...")
         monitor_instance = TelegramMonitor(
             api_id=api_id,
             api_hash=api_hash,
@@ -67,7 +71,7 @@ def run_monitor_async(api_id, api_hash, keywords, groups):
         print("[MONITOR] Запускаю...")
         monitor_loop.run_until_complete(monitor_instance.start())
     except Exception as e:
-        print(f"[ОШИБКА] В run_monitor_async: {e}")
+        print(f"[ОШИБКА] Мониторинг: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -81,20 +85,18 @@ def start_monitoring():
     data = load_data()
 
     if not data.get("keywords") or not data.get("groups"):
-        print("[ОТКАЗ] Нет ключевых слов или групп")
+        print("[ОТКАЗ] Нет данных")
         return False
     if monitor_thread and monitor_thread.is_alive():
-        print("[УЖЕ РАБОТАЕТ]")
         return False
 
-    print("[ЗАПУСК] Мониторинг...")
     monitor_thread = threading.Thread(
         target=run_monitor_async,
         args=(API_ID, API_HASH, data["keywords"], data["groups"]),
         daemon=True
     )
     monitor_thread.start()
-    print("[УСПЕХ] ЗАПУЩЕН!\n")
+    print("[УСПЕХ] ЗАПУЩЕН!")
     return True
 
 
@@ -106,7 +108,7 @@ def stop_monitoring():
             future.result(timeout=10)
             print("[УСПЕХ] Остановлен")
         except Exception as e:
-            print(f"[ОШИБКА] При остановке: {e}")
+            print(f"[ОШИБКА] Остановка: {e}")
     return True
 
 
@@ -251,35 +253,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         {alerts_html}
 
         <p style="color:#888; margin-top:50px; font-size:0.9em;">
-            Dashboat v3.0 | @Shmelibze | Батуми
+            Dashboat v3.1 | @Shmelibze | Батуми
         </p>
         </body></html>
         """
 
 
-# === Запуск ===
-def get_free_port(default=5000, max_tries=20):
-    for i in range(max_tries):
-        port = default + i
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("0.0.0.0", port))
-                return port
-            except OSError:
-                continue
-    return default
-
-
+# === Запуск (ВАЖНО: PORT ИЗ ENV) ===
 def run_server():
-    port = int(os.environ.get("PORT", get_free_port()))
-    print(f"\nDASHBOARD: http://0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 10000))  # Render даёт PORT
+    print(f"[SERVER] Запуск на порту {port}")
 
+    # Автозапуск
     data = load_data()
     if data.get("monitoring_active") and data.get("keywords") and data.get("groups"):
-        print("[АВТОЗАПУСК] Мониторинг при старте...")
+        print("[АВТОЗАПУСК] Мониторинг...")
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), DashboardHandler)
+    print(f"[DASHBOARD] http://0.0.0.0:{port}")
     server.serve_forever()
 
 
