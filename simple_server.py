@@ -11,8 +11,8 @@ from telegram_monitor import TelegramMonitor
 
 # === Настройки ===
 DATA_FILE = "dashboat_data.json"
-API_ID = 24777032
-API_HASH = "12da668ad167c903820f8899ea202158"
+API_ID = int(os.environ.get("API_ID", "24777032"))
+API_HASH = os.environ.get("API_HASH", "12da668ad167c903820f8899ea202158")
 
 monitor_instance = None
 monitor_thread = None
@@ -28,8 +28,7 @@ def load_data():
                 if "groups" in data:
                     data["groups"] = [str(g).strip() for g in data["groups"]]
                 return data
-        except json.JSONDecodeError as e:
-            print(f"[ОШИБКА] JSON повреждён: {e}")
+        except json.JSONDecodeError:
             return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
 
@@ -58,9 +57,6 @@ def run_monitor_async(api_id, api_hash, keywords, groups):
 
     try:
         print(f"\n[MONITOR] Создаю TelegramMonitor...")
-        print(f"   Ключевые слова: {keywords}")
-        print(f"   Группы: {groups}")
-
         monitor_instance = TelegramMonitor(
             api_id=api_id,
             api_hash=api_hash,
@@ -68,10 +64,8 @@ def run_monitor_async(api_id, api_hash, keywords, groups):
             groups=groups,
             callback=add_alert
         )
-        print("[MONITOR] TelegramMonitor создан")
-        print("[MONITOR] Запускаю client.start()...")
+        print("[MONITOR] Запускаю...")
         monitor_loop.run_until_complete(monitor_instance.start())
-
     except Exception as e:
         print(f"[ОШИБКА] В run_monitor_async: {e}")
         import traceback
@@ -80,36 +74,27 @@ def run_monitor_async(api_id, api_hash, keywords, groups):
         if monitor_loop.is_running():
             monitor_loop.stop()
         monitor_loop.close()
-        print("[MONITOR] Цикл закрыт")
 
 
 def start_monitoring():
     global monitor_thread
     data = load_data()
 
-    print(f"\n[START] Проверка данных:")
-    print(f"   Ключевые слова: {data.get('keywords', [])}")
-    print(f"   Группы: {data.get('groups', [])}")
-    print(f"   monitoring_active: {data.get('monitoring_active')}")
-
-    if not data.get("keywords"):
-        print("[ОТКАЗ] Нет ключевых слов")
-        return False
-    if not data.get("groups"):
-        print("[ОТКАЗ] Нет групп")
+    if not data.get("keywords") or not data.get("groups"):
+        print("[ОТКАЗ] Нет ключевых слов или групп")
         return False
     if monitor_thread and monitor_thread.is_alive():
-        print("[УЖЕ РАБОТАЕТ] Мониторинг уже запущен")
+        print("[УЖЕ РАБОТАЕТ]")
         return False
 
-    print("[ЗАПУСК] Запускаю мониторинг...")
+    print("[ЗАПУСК] Мониторинг...")
     monitor_thread = threading.Thread(
         target=run_monitor_async,
         args=(API_ID, API_HASH, data["keywords"], data["groups"]),
-        daemon=True,
+        daemon=True
     )
     monitor_thread.start()
-    print("[УСПЕХ] МОНИТОРИНГ УСПЕШНО ЗАПУЩЕН!\n")
+    print("[УСПЕХ] ЗАПУЩЕН!\n")
     return True
 
 
@@ -117,22 +102,17 @@ def stop_monitoring():
     global monitor_instance, monitor_loop
     if monitor_instance and monitor_loop and monitor_loop.is_running():
         try:
-            print("[ОСТАНОВКА] Останавливаю мониторинг...")
             future = asyncio.run_coroutine_threadsafe(monitor_instance.stop(), monitor_loop)
             future.result(timeout=10)
-            print("[УСПЕХ] Мониторинг остановлен")
+            print("[УСПЕХ] Остановлен")
         except Exception as e:
             print(f"[ОШИБКА] При остановке: {e}")
-    else:
-        print("[ИНФО] Мониторинг не запущен")
     return True
 
 
 # === Dashboard ===
 class DashboardHandler(BaseHTTPRequestHandler):
-
     def do_HEAD(self):
-        """Поддержка HEAD-запросов от UptimeRobot"""
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
@@ -156,26 +136,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         post_data = self.rfile.read(content_length).decode("utf-8")
         params = urllib.parse.parse_qs(post_data)
-
-        print(f"\n[POST] Путь: {self.path}")
-        print(f"[POST] Данные: {params}")
-
         data = load_data()
-        path = self.path
 
+        path = self.path
         if path == "/api/add_keyword":
             kw = params.get("keyword", [""])[0].strip().lower()
             if kw and kw not in data["keywords"]:
                 data["keywords"].append(kw)
                 save_data(data)
-                print(f"[ДОБАВЛЕНО] Ключевое слово: {kw}")
 
         elif path == "/api/add_group":
             grp = params.get("group", [""])[0].strip()
             if grp and grp not in data["groups"]:
                 data["groups"].append(grp)
                 save_data(data)
-                print(f"[ДОБАВЛЕНО] Группа: {grp}")
 
         elif path == "/api/delete_keyword":
             kw = params.get("keyword", [""])[0]
@@ -190,14 +164,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 save_data(data)
 
         elif path == "/api/start_monitoring":
-            print("[КНОПКА] Нажата START")
             if start_monitoring():
                 data["monitoring_active"] = True
                 save_data(data)
-                print("[УСПЕХ] monitoring_active = True")
 
         elif path == "/api/stop_monitoring":
-            print("[КНОПКА] Нажата STOP")
             stop_monitoring()
             data["monitoring_active"] = False
             save_data(data)
@@ -205,7 +176,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/clear_alerts":
             data["alerts"] = []
             save_data(data)
-            print("[ОЧИЩЕНО] Алерты удалены")
 
         self.send_response(302)
         self.send_header("Location", "/")
@@ -231,8 +201,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         alerts = data.get("alerts", [])[-10:]
         alerts_html = "".join(
             f"<div style='border:1px solid #ddd;padding:10px;margin:5px;border-radius:5px;'>"
-            f"<b>{a['timestamp']}</b> — <b>{a['keyword']}</b> в <i>{a['group']}</i><br>"
-            f"{a['message'][:200]}{'...' if len(a['message']) > 200 else ''}</div>"
+            f"<b>{a['timestamp']}</b> — <a href='{a['link']}' target='_blank' style='color:#007bff;text-decoration:none;'>"
+            f"<b>{a['keyword']}</b> в <i>{a['group']}</i></a><br>"
+            f"<small>{a['message'][:200]}{'...' if len(a['message']) > 200 else ''}</small></div>"
             for a in alerts
         ) or "<p>Нет оповещений</p>"
 
@@ -261,7 +232,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         <h2>Ключевые слова</h2>
         <form method="POST" action="/api/add_keyword">
-            <input type="text" name="keyword" placeholder="Например: масляный" required>
+            <input type="text" name="keyword" placeholder="масляный" required>
             <button>Add</button>
         </form>
         <ul>{keywords_html}</ul>
@@ -280,13 +251,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         {alerts_html}
 
         <p style="color:#888; margin-top:50px; font-size:0.9em;">
-            Dashboat v2.0 | Автообновление каждые 10 сек
+            Dashboat v3.0 | @Shmelibze | Батуми
         </p>
         </body></html>
         """
 
 
-# === Запуск сервера ===
+# === Запуск ===
 def get_free_port(default=5000, max_tries=20):
     for i in range(max_tries):
         port = default + i
@@ -300,14 +271,12 @@ def get_free_port(default=5000, max_tries=20):
 
 
 def run_server():
-    port = get_free_port()
+    port = int(os.environ.get("PORT", get_free_port()))
     print(f"\nDASHBOARD: http://0.0.0.0:{port}")
-    print("Откройте Preview в Replit\n")
 
-    # Автозапуск при старте
     data = load_data()
     if data.get("monitoring_active") and data.get("keywords") and data.get("groups"):
-        print("[АВТОЗАПУСК] Запускаю мониторинг при старте...")
+        print("[АВТОЗАПУСК] Мониторинг при старте...")
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), DashboardHandler)
