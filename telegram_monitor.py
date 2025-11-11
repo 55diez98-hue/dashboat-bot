@@ -1,7 +1,7 @@
 # telegram_monitor.py
 import asyncio
 import logging
-from telegram import Bot
+from telegram import Bot  # ← ПРАВИЛЬНЫЙ ИМПОРТ
 
 # ТВОЙ БОТ
 TOKEN = "8273686092:AAGzLB6U6bog-itMWK4b8lUulrxFzNmcknk"
@@ -20,13 +20,14 @@ class TelegramMonitor:
     async def start(self):
         print("[MONITOR] Запуск get_updates...")
 
-        # Получаем названия групп (опционально)
+        # Названия групп (опционально)
         self.group_titles = {}
         for group_id in self.groups:
             try:
                 chat = await bot.get_chat(group_id)
                 self.group_titles[group_id] = chat.title or str(group_id)
-            except:
+            except Exception as e:
+                print(f"[ОШИБКА] get_chat {group_id}: {e}")
                 self.group_titles[group_id] = f"Группа {group_id}"
 
         while True:
@@ -76,7 +77,7 @@ class TelegramMonitor:
                                 )
                                 print(f"[ALERT] Отправлено: {kw}")
                             except Exception as e:
-                                print(f"[ОШИБКА] Не отправлено: {e}")
+                                print(f"[ОШИБКА] send_message: {e}")
 
                 await asyncio.sleep(1)
             except Exception as e:
@@ -85,3 +86,4 @@ class TelegramMonitor:
 
     async def stop(self):
         print("[MONITOR] Остановка...")
+                    
