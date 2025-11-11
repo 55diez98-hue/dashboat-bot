@@ -1,74 +1,87 @@
 # telegram_monitor.py
-from telethon import TelegramClient, events
 import asyncio
+import logging
+from telegram import Bot
 
-ALERT_CHAT_ID = -1003268583096
+# ТВОЙ БОТ
+TOKEN = "8273686092:AAGzLB6U6bog-itMWK4b8lUulrxFzNmcknk"
+ALERT_CHAT_ID = -1003268583096  # ← Группа "барахло"
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(TOKEN)
 
 class TelegramMonitor:
     def __init__(self, api_id, api_hash, keywords, groups, callback):
-        self.api_id = api_id
-        self.api_hash = api_hash
         self.keywords = [kw.lower() for kw in keywords]
         self.groups = [int(g) for g in groups]
         self.callback = callback
-        self.client = TelegramClient('monitor_session', api_id, api_hash)
-        self.group_titles = {}
+        self.last_update_id = 0
 
     async def start(self):
-        print("[MONITOR] Авторизация...")
-        await self.client.start()  # Сессия уже есть → без ввода
-        print("[MONITOR] Авторизован!")
+        print("[MONITOR] Запуск get_updates...")
 
+        # Получаем названия групп (опционально)
+        self.group_titles = {}
         for group_id in self.groups:
             try:
-                entity = await self.client.get_entity(group_id)
-                title = getattr(entity, 'title', str(group_id))
-                self.group_titles[group_id] = title
-                print(f"[MONITOR] Подключено: {title}")
+                chat = await bot.get_chat(group_id)
+                self.group_titles[group_id] = chat.title or str(group_id)
+            except:
+                self.group_titles[group_id] = f"Группа {group_id}"
+
+        while True:
+            try:
+                updates = await bot.get_updates(offset=self.last_update_id + 1, timeout=30)
+                for update in updates:
+                    self.last_update_id = update.update_id
+                    message = update.message
+                    if not message or not message.text:
+                        continue
+
+                    chat_id = message.chat.id
+                    if chat_id not in self.groups:
+                        continue
+
+                    text = message.text.lower()
+                    group_title = self.group_titles.get(chat_id, "Неизвестно")
+
+                    for kw in self.keywords:
+                        if kw in text:
+                            # Ссылка
+                            clean_id = str(chat_id)[4:] if str(chat_id).startswith('-100') else str(chat_id)
+                            msg_link = f"https://t.me/c/{clean_id}/{message.message_id}"
+
+                            # Дашборд
+                            self.callback({
+                                'keyword': kw,
+                                'group': group_title,
+                                'group_id': chat_id,
+                                'message': message.text,
+                                'link': msg_link
+                            })
+
+                            # В "барахло"
+                            alert_text = (
+                                f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
+                                f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
+                                f"<i>{message.text[:300]}{'...' if len(message.text) > 300 else ''}</i>"
+                            )
+
+                            try:
+                                await bot.send_message(
+                                    chat_id=ALERT_CHAT_ID,
+                                    text=alert_text,
+                                    parse_mode='HTML',
+                                    disable_web_page_preview=True
+                                )
+                                print(f"[ALERT] Отправлено: {kw}")
+                            except Exception as e:
+                                print(f"[ОШИБКА] Не отправлено: {e}")
+
+                await asyncio.sleep(1)
             except Exception as e:
-                print(f"[ОШИБКА] Группа {group_id}: {e}")
-
-        @self.client.on(events.NewMessage(chats=self.groups))
-        async def handler(event):
-            if not event.message or not event.message.message:
-                return
-
-            text = event.message.message.lower()
-            group_id = event.message.to_id.channel_id or event.message.chat_id
-            group_title = self.group_titles.get(group_id, "Неизвестно")
-
-            for kw in self.keywords:
-                if kw in text:
-                    clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
-                    msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
-
-                    alert_data = {
-                        'keyword': kw,
-                        'group': group_title,
-                        'group_id': group_id,
-                        'message': event.message.message,
-                        'link': msg_link
-                    }
-                    self.callback(alert_data)
-
-                    alert_text = (
-                        f"<b>Найдено в:</b> <a href='{msg_link}'>{group_title}</a>\n"
-                        f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
-                        f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
-                    )
-
-                    try:
-                        await self.client.send_message(
-                            ALERT_CHAT_ID,
-                            alert_text,
-                            parse_mode='html',
-                            disable_web_page_preview=True
-                        )
-                    except Exception as e:
-                        print(f"[ОШИБКА] Отправка: {e}")
-
-        print(f"[MONITOR] Слушаем {len(self.groups)} групп...")
-        await self.client.run_until_disconnected()
+                print(f"[ОШИБКА] get_updates: {e}")
+                await asyncio.sleep(5)
 
     async def stop(self):
-        await self.client.disconnect()
+        print("[MONITOR] Остановка...")
