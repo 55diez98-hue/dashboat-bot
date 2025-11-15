@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: dashboat-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python simple_server.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ALERT_CHAT_ID
+        sync: false
