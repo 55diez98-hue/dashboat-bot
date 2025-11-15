@@ -9,7 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
 
 DATA_FILE = "dashboat_data.json"
-monitor_thread = None
+monitor_thread = None 
 
 def load_data():
     if os.path.exists(DATA_FILE):
