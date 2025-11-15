@@ -1,20 +1,19 @@
 # telegram_monitor.py
 from telethon import TelegramClient, events
-from telegram import Bot  # python-telegram-bot
+from telegram import Bot
 import asyncio
+import os
 
-# === TELETHON (чтение) ===
-API_ID = 24777032
-API_HASH = "12da668ad167c903820f8899ea202158"
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
+
 client = TelegramClient('monitor_session', API_ID, API_HASH)
-
-# === BOT API (отправка) ===
-BOT_TOKEN = "8273686092:AAGzLB6U6bog-itMWK4b8lUulrxFzNmcknk"
-ALERT_CHAT_ID = -1003268583096
 bot = Bot(BOT_TOKEN)
 
 class TelegramMonitor:
-    def __init__(self, api_id, api_hash, keywords, groups, callback):
+    def __init__(self, keywords, groups, callback):
         self.keywords = [kw.lower() for kw in keywords]
         self.groups = [int(g) for g in groups]
         self.callback = callback
@@ -25,7 +24,6 @@ class TelegramMonitor:
         await client.start()
         print("[MONITOR] Авторизован!")
 
-        # Названия групп
         for group_id in self.groups:
             try:
                 entity = await client.get_entity(group_id)
@@ -49,7 +47,6 @@ class TelegramMonitor:
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
-                    # Дашборд
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -58,7 +55,6 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
-                    # В "барахло"
                     alert_text = (
                         f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
                         f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
