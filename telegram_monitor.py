@@ -1,3 +1,7 @@
+@client.on(events.NewMessage(chats=self.groups))
+async def handler(event):
+    print(f"[DEBUG] Новое сообщение в {event.message.chat_id}: {event.message.message[:50]}")  # Добавь это
+    # ... остальной код
 # telegram_monitor.py
 from telethon import TelegramClient, events
 from telegram import Bot
