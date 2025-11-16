@@ -3,13 +3,18 @@ from telethon import TelegramClient, events
 from telegram import Bot
 import asyncio
 import os
+import logging
+
+# === ЛОГИРОВАНИЕ ДЛЯ RENDER ===
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
 # === ENV (обязательно в Render) ===
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
-PHONE = os.getenv("PHONE")  # +79115467437 — твой номер
+PHONE = os.getenv("PHONE")  # +995xxxxxxxxx — твой номер
 CODE = os.getenv("CODE")    # 12345 — код из SMS (только для первой авторизации)
 
 if not all([API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID]):
@@ -26,7 +31,7 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
-        print("[MONITOR] Запуск Telethon...")
+        log.info("[MONITOR] Запуск Telethon...")
         try:
             # === АВТО-АВТОРИЗАЦИЯ ЧЕРЕЗ ENV (без input) ===
             if os.path.exists('monitor_session.session'):
@@ -34,7 +39,7 @@ class TelegramMonitor:
                 await client.connect()
                 if not await client.is_user_authorized():
                     raise Exception("Сессия не авторизована — удалите monitor_session.session и добавьте CODE в ENV")
-                print("[MONITOR] Авторизован (по сессии)!")
+                log.info("[MONITOR] Авторизован (по сессии)!")
             else:
                 # Первая авторизация
                 if not PHONE or not CODE:
@@ -42,9 +47,9 @@ class TelegramMonitor:
                 
                 await client.start(phone=PHONE)
                 await client.sign_in(phone=PHONE, code=CODE)
-                print("[MONITOR] Авторизован (по коду из ENV)!")
+                log.info("[MONITOR] Авторизован (по коду из ENV)!")
         except Exception as e:
-            print(f"[ОШИБКА] Авторизация: {e}")
+            log.error(f"[ОШИБКА] Авторизация: {e}")
             raise
 
         # Получаем названия групп
@@ -52,9 +57,9 @@ class TelegramMonitor:
             try:
                 entity = await client.get_entity(group_id)
                 self.group_titles[group_id] = entity.title
-                print(f"[MONITOR] Подключено: {entity.title}")
+                log.info(f"[MONITOR] Подключено: {entity.title}")
             except Exception as e:
-                print(f"[ОШИБКА] Группа {group_id}: {e}")
+                log.error(f"[ОШИБКА] Группа {group_id}: {e}")
                 self.group_titles[group_id] = f"Группа {group_id}"
 
         @client.on(events.NewMessage(chats=self.groups))
@@ -96,11 +101,11 @@ class TelegramMonitor:
                                 parse_mode='HTML',
                                 disable_web_page_preview=True
                             )
-                            print(f"[ALERT] Отправлено: {kw}")
+                            log.info(f"[ALERT] Отправлено: {kw}")
                         except Exception as e:
-                            print(f"[ОШИБКА] Bot API: {e}")
+                            log.error(f"[ОШИБКА] Bot API: {e}")
 
-        print(f"[MONITOR] Слушаем {len(self.groups)} групп...")
+        log.info(f"[MONITOR] Слушаем {len(self.groups)} групп...")
         await client.run_until_disconnected()
 
     async def stop(self):
