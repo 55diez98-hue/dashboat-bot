@@ -18,7 +18,7 @@ if not BOT_TOKEN:
 if ALERT_CHAT_ID == 0:
     print("[ОШИБКА] ALERT_CHAT_ID не установлен!")
 
-# Клиент и бот
+# Клиент и бот (глобальные, но не переопределяем внутри функции)
 client = TelegramClient('monitor_session', API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 
@@ -31,6 +31,8 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
+        global client  # ← Объявляем global В НАЧАЛЕ функции
+
         if API_ID == 0 or not API_HASH:
             print("[MONITOR] Пропуск запуска — нет API_ID/API_HASH")
             return
@@ -47,8 +49,7 @@ class TelegramMonitor:
                 if "matching constructor ID" in str(e).lower():
                     print(f"[RETRY] TLObject ошибка (попытка {attempt+1}/3): {e}")
                     await asyncio.sleep(10)
-                    # Пересоздаём клиент
-                    global client
+                    # Пересоздаём клиент (global уже объявлен выше)
                     client = TelegramClient('monitor_session', API_ID, API_HASH)
                 else:
                     print(f"[ОШИБКА] Не удалось авторизоваться: {e}")
@@ -78,11 +79,9 @@ class TelegramMonitor:
 
             for kw in self.keywords:
                 if kw in text:
-                    # Генерация ссылки на сообщение
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
-                    # Сохраняем алерт
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -91,14 +90,12 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
-                    # Отправка алерта
                     if bot and ALERT_CHAT_ID != 0:
                         alert_text = (
                             f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
                             f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
                             f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
                         )
-
                         try:
                             await bot.send_message(
                                 chat_id=ALERT_CHAT_ID,
