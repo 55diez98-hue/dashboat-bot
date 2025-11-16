@@ -1,12 +1,9 @@
-@client.on(events.NewMessage(chats=self.groups))
-async def handler(event):
-    print(f"[DEBUG] Новое сообщение в {event.message.chat_id}: {event.message.message[:50]}")  # Добавь это
-    # ... остальной код
 # telegram_monitor.py
 from telethon import TelegramClient, events
 from telegram import Bot
 import asyncio
 import os
+import traceback
 
 # === ENV ===
 API_ID = int(os.getenv("API_ID"))
@@ -36,7 +33,7 @@ class TelegramMonitor:
             try:
                 entity = await client.get_entity(group_id)
                 self.group_titles[group_id] = entity.title
-                print(f"[MONITOR] Подключено: {entity.title}")
+                print(f"[MONITOR] Подключено: {entity.title} (ID: {group_id})")
             except Exception as e:
                 print(f"[ОШИБКА] Группа {group_id}: {e}")
                 self.group_titles[group_id] = f"Группа {group_id}"
@@ -50,8 +47,12 @@ class TelegramMonitor:
             group_id = event.message.chat_id
             group_title = self.group_titles.get(group_id, "Неизвестно")
 
+            print(f"[DEBUG] Новое сообщение в {group_id} ({group_title}): {text[:50]}...")  # ОТЛАДКА: Видит ли сообщения
+
             for kw in self.keywords:
                 if kw in text:
+                    print(f"[DEBUG] Матч: '{kw}' в '{text}'")  # ОТЛАДКА: Срабатывает ли ключевое слово
+
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
@@ -76,12 +77,14 @@ class TelegramMonitor:
                             parse_mode='HTML',
                             disable_web_page_preview=True
                         )
-                        print(f"[ALERT] Отправлено: {kw}")
+                        print(f"[ALERT] Отправлено: {kw} в группу {ALERT_CHAT_ID}")  # ОТЛАДКА: Успех отправки
                     except Exception as e:
                         print(f"[ОШИБКА] Bot API: {e}")
+                        print(f"[DEBUG] Traceback: {traceback.format_exc()}")  # ОТЛАДКА: Полная ошибка
 
         print(f"[MONITOR] Слушаем {len(self.groups)} групп...")
         await client.run_until_disconnected()
 
     async def stop(self):
         await client.disconnect()
+        print("[MONITOR] Остановлен")
