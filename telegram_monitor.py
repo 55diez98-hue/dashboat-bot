@@ -3,19 +3,25 @@ from telethon import TelegramClient, events
 from telegram import Bot
 import asyncio
 import os
-import traceback
 
-# === ENV ===
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
+# === ENV (без raise на старте — только логи) ===
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID", "0"))
 
-if not all([API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID]):
-    raise ValueError("Установите API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID в Render")
+# Проверка ENV (логи, но не краш)
+if API_ID == 0 or not API_HASH:
+    print("[ОШИБКА] API_ID или API_HASH не установлены! Добавьте в Render ENV.")
+if not BOT_TOKEN:
+    print("[ОШИБКА] BOT_TOKEN не установлен!")
+if ALERT_CHAT_ID == 0:
+    print("[ОШИБКА] ALERT_CHAT_ID не установлен!")
 
+# Клиент и бот
 client = TelegramClient('monitor_session', API_ID, API_HASH)
-bot = Bot(BOT_TOKEN)
+bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
+
 
 class TelegramMonitor:
     def __init__(self, keywords, groups, callback):
@@ -25,15 +31,38 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
-        print("[MONITOR] Запуск Telethon...")
-        await client.start()
-        print("[MONITOR] Авторизован!")
+        if API_ID == 0 or not API_HASH:
+            print("[MONITOR] Пропуск запуска — нет API_ID/API_HASH")
+            return
 
+        print("[MONITOR] Запуск Telethon...")
+
+        # Retry на случай TLObject ошибки
+        for attempt in range(3):
+            try:
+                await client.start()
+                print("[MONITOR] Авторизован!")
+                break
+            except Exception as e:
+                if "matching constructor ID" in str(e).lower():
+                    print(f"[RETRY] TLObject ошибка (попытка {attempt+1}/3): {e}")
+                    await asyncio.sleep(10)
+                    # Пересоздаём клиент
+                    global client
+                    client = TelegramClient('monitor_session', API_ID, API_HASH)
+                else:
+                    print(f"[ОШИБКА] Не удалось авторизоваться: {e}")
+                    raise e
+        else:
+            print("[ОШИБКА] Не удалось запустить Telethon после 3 попыток")
+            return
+
+        # Получаем названия групп
         for group_id in self.groups:
             try:
                 entity = await client.get_entity(group_id)
                 self.group_titles[group_id] = entity.title
-                print(f"[MONITOR] Подключено: {entity.title} (ID: {group_id})")
+                print(f"[MONITOR] Подключено: {entity.title}")
             except Exception as e:
                 print(f"[ОШИБКА] Группа {group_id}: {e}")
                 self.group_titles[group_id] = f"Группа {group_id}"
@@ -47,15 +76,13 @@ class TelegramMonitor:
             group_id = event.message.chat_id
             group_title = self.group_titles.get(group_id, "Неизвестно")
 
-            print(f"[DEBUG] Новое сообщение в {group_id} ({group_title}): {text[:50]}...")  # ОТЛАДКА: Видит ли сообщения
-
             for kw in self.keywords:
                 if kw in text:
-                    print(f"[DEBUG] Матч: '{kw}' в '{text}'")  # ОТЛАДКА: Срабатывает ли ключевое слово
-
+                    # Генерация ссылки на сообщение
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
+                    # Сохраняем алерт
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -64,23 +91,24 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
-                    alert_text = (
-                        f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
-                        f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
-                        f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
-                    )
-
-                    try:
-                        await bot.send_message(
-                            chat_id=ALERT_CHAT_ID,
-                            text=alert_text,
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
+                    # Отправка алерта
+                    if bot and ALERT_CHAT_ID != 0:
+                        alert_text = (
+                            f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
+                            f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
+                            f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
                         )
-                        print(f"[ALERT] Отправлено: {kw} в группу {ALERT_CHAT_ID}")  # ОТЛАДКА: Успех отправки
-                    except Exception as e:
-                        print(f"[ОШИБКА] Bot API: {e}")
-                        print(f"[DEBUG] Traceback: {traceback.format_exc()}")  # ОТЛАДКА: Полная ошибка
+
+                        try:
+                            await bot.send_message(
+                                chat_id=ALERT_CHAT_ID,
+                                text=alert_text,
+                                parse_mode='HTML',
+                                disable_web_page_preview=True
+                            )
+                            print(f"[ALERT] Отправлено: {kw}")
+                        except Exception as e:
+                            print(f"[ОШИБКА] Bot API: {e}")
 
         print(f"[MONITOR] Слушаем {len(self.groups)} групп...")
         await client.run_until_disconnected()
