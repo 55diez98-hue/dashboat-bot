@@ -9,7 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
 
 DATA_FILE = "dashboat_data.json"
-monitor_thread = None 
+monitor_thread = None
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -110,6 +110,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", "/")
         self.end_headers()
+
+    def do_HEAD(self):
+        """Поддержка HEAD для UptimeRobot и проверок"""
+        if self.path in ["/", "/index.html"]:
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+        elif self.path == "/api/data":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+        else:
+            self.send_response(404)
+        self.end_headers()  # Без тела запроса
 
     def send_json(self, data):
         self.send_response(200)
