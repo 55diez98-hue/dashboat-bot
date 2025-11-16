@@ -4,24 +4,18 @@ from telegram import Bot
 import asyncio
 import os
 
-# === ENV (без raise на старте — только логи) ===
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID", "0"))
+# === ENV (обязательно в Render) ===
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
+PHONE = os.getenv("PHONE")  # +995xxxxxxxxx — твой номер (для первой авторизации)
 
-# Проверка ENV (логи, но не краш)
-if API_ID == 0 or not API_HASH:
-    print("[ОШИБКА] API_ID или API_HASH не установлены! Добавьте в Render ENV.")
-if not BOT_TOKEN:
-    print("[ОШИБКА] BOT_TOKEN не установлен!")
-if ALERT_CHAT_ID == 0:
-    print("[ОШИБКА] ALERT_CHAT_ID не установлен!")
+if not all([API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID]):
+    raise ValueError("Установите API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID в Render")
 
-# Клиент и бот (глобальные, но не переопределяем внутри функции)
 client = TelegramClient('monitor_session', API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
-
 
 class TelegramMonitor:
     def __init__(self, keywords, groups, callback):
@@ -31,32 +25,18 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
-        global client  # ← Объявляем global В НАЧАЛЕ функции
-
-        if API_ID == 0 or not API_HASH:
-            print("[MONITOR] Пропуск запуска — нет API_ID/API_HASH")
-            return
-
         print("[MONITOR] Запуск Telethon...")
-
-        # Retry на случай TLObject ошибки
-        for attempt in range(3):
-            try:
-                await client.start()
-                print("[MONITOR] Авторизован!")
-                break
-            except Exception as e:
-                if "matching constructor ID" in str(e).lower():
-                    print(f"[RETRY] TLObject ошибка (попытка {attempt+1}/3): {e}")
-                    await asyncio.sleep(10)
-                    # Пересоздаём клиент (global уже объявлен выше)
-                    client = TelegramClient('monitor_session', API_ID, API_HASH)
-                else:
-                    print(f"[ОШИБКА] Не удалось авторизоваться: {e}")
-                    raise e
-        else:
-            print("[ОШИБКА] Не удалось запустить Telethon после 3 попыток")
-            return
+        try:
+            # Явная авторизация с вводом кода (один раз)
+            await client.start(
+                phone=lambda: PHONE,
+                code_callback=lambda: input("[TELETHON] Введите код из Telegram: "),
+                password=lambda: input("[TELETHON] Введите 2FA пароль (если есть): ")
+            )
+            print("[MONITOR] Авторизован!")
+        except Exception as e:
+            print(f"[ОШИБКА] Авторизация: {e}")
+            raise
 
         # Получаем названия групп
         for group_id in self.groups:
@@ -79,9 +59,11 @@ class TelegramMonitor:
 
             for kw in self.keywords:
                 if kw in text:
+                    # Формируем ссылку на сообщение
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
+                    # Сохраняем алерт в JSON
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -90,12 +72,14 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
+                    # Отправляем алерт в группу
                     if bot and ALERT_CHAT_ID != 0:
                         alert_text = (
                             f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
                             f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
                             f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
                         )
+
                         try:
                             await bot.send_message(
                                 chat_id=ALERT_CHAT_ID,
@@ -112,4 +96,3 @@ class TelegramMonitor:
 
     async def stop(self):
         await client.disconnect()
-        print("[MONITOR] Остановлен")
