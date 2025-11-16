@@ -9,7 +9,8 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
-PHONE = os.getenv("PHONE")  # +995xxxxxxxxx — твой номер (для первой авторизации)
+PHONE = os.getenv("PHONE")  # +995xxxxxxxxx — твой номер
+CODE = os.getenv("CODE")    # 12345 — код из SMS (только для первой авторизации)
 
 if not all([API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID]):
     raise ValueError("Установите API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID в Render")
@@ -27,13 +28,21 @@ class TelegramMonitor:
     async def start(self):
         print("[MONITOR] Запуск Telethon...")
         try:
-            # Явная авторизация с вводом кода (один раз)
-            await client.start(
-                phone=lambda: PHONE,
-                code_callback=lambda: input("[TELETHON] Введите код из Telegram: "),
-                password=lambda: input("[TELETHON] Введите 2FA пароль (если есть): ")
-            )
-            print("[MONITOR] Авторизован!")
+            # === АВТО-АВТОРИЗАЦИЯ ЧЕРЕЗ ENV (без input) ===
+            if os.path.exists('monitor_session.session'):
+                # Сессия есть — подключаемся
+                await client.connect()
+                if not await client.is_user_authorized():
+                    raise Exception("Сессия не авторизована — удалите monitor_session.session и добавьте CODE в ENV")
+                print("[MONITOR] Авторизован (по сессии)!")
+            else:
+                # Первая авторизация
+                if not PHONE or not CODE:
+                    raise Exception("Добавьте PHONE и CODE в Render ENV для первой авторизации")
+                
+                await client.start(phone=PHONE)
+                await client.sign_in(phone=PHONE, code=CODE)
+                print("[MONITOR] Авторизован (по коду из ENV)!")
         except Exception as e:
             print(f"[ОШИБКА] Авторизация: {e}")
             raise
@@ -59,11 +68,11 @@ class TelegramMonitor:
 
             for kw in self.keywords:
                 if kw in text:
-                    # Формируем ссылку на сообщение
+                    # Формируем ссылку
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
-                    # Сохраняем алерт в JSON
+                    # Сохраняем в JSON
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -72,7 +81,7 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
-                    # Отправляем алерт в группу
+                    # Отправляем алерт
                     if bot and ALERT_CHAT_ID != 0:
                         alert_text = (
                             f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
