@@ -17,9 +17,6 @@ log = logging.getLogger(__name__)
 DATA_FILE = "dashboat_data.json"
 monitor_thread = None
 
-# === УДАЛЕНИЕ СЕССИИ ПРИ СТАРТЕ ===
-subprocess.run(['python', 'force_new_session.py'])  # <-- ДОБАВЛЕНО
-
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
