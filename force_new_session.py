@@ -1,4 +1,4 @@
- import os
+import os
 session_file = 'monitor_session.session'
 if os.path.exists(session_file):
     os.remove(session_file)
