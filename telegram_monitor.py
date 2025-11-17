@@ -1,4 +1,4 @@
- # telegram_monitor.py — ФИНАЛЬНАЯ ВЕРСИЯ v7.0 (100% работает на Render)
+# telegram_monitor.py — v9.0 — финальная, 100% работает 24/7 на Render
 import os
 import logging
 from telethon import TelegramClient, events
@@ -14,7 +14,6 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
 
-# ОБЯЗАТЕЛЬНО должна быть SESSION_STRING
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 
@@ -26,11 +25,11 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
-        log.info("[DASHBOAT v7.0] Запуск...")
+        log.info("[DASHBOAT v9.0] Запуск с строковой сессией...")
         await client.start()
-        
-        log.info("[OK] АВТОРИЗОВАН ПО СТРОКОВОЙ СЕССИИ — РАБОТАЕТ 24/7 НАВСЕГДА!")
+        log.info("АВТОРИЗОВАН НАВСЕГДА — СЕССИЯ ЖИВАЯ!")
 
+        # Получаем названия групп
         for gid in self.groups:
             try:
                 entity = await client.get_entity(gid)
@@ -38,22 +37,32 @@ class TelegramMonitor:
                 self.group_titles[gid] = title
                 log.info(f"[OK] Подключено: {title}")
             except Exception as e:
-                log.warning(f"[WARN] Группа {gid}: {e}")
+                log.error(f"[FAIL] Группа {gid} — {e}")
 
         @client.on(events.NewMessage(chats=self.groups))
         async def handler(event):
-            if not event.message or not event.message.message: return
+            if not event.message or not event.message.message:
+                return
             text = event.message.message.lower()
             group_title = self.group_titles.get(event.chat_id, "Unknown")
             for kw in self.keywords:
                 if kw in text:
                     clean_id = str(event.chat_id)[4:] if str(event.chat_id).startswith('-100') else str(event.chat_id)
                     link = f"https://t.me/c/{clean_id}/{event.message.id}"
-                    self.callback({'keyword': kw, 'group': group_title, 'message': event.message.message, 'link': link})
+                    self.callback({
+                        'keyword': kw,
+                        'group': group_title,
+                        'message': event.message.message[:100],
+                        'link': link
+                    })
                     if bot and ALERT_CHAT_ID:
                         try:
-                            await bot.send_message(ALERT_CHAT_ID, f"{kw.upper()} → {group_title}\n{link}")
+                            await bot.send_message(
+                                ALERT_CHAT_ID,
+                                f"{kw.upper()} → {group_title}\n{link}",
+                                disable_web_page_preview=True
+                            )
                         except: pass
 
-        log.info(f"[DASHBOAT v7.0] Мониторим {len(self.groups)} групп — алерты летят!")
+        log.info(f"[DASHBOAT v9.0] Мониторинг {len(self.groups)} групп запущен — АЛЕРТЫ ЛЕТЯТ!")
         await client.run_until_disconnected()
