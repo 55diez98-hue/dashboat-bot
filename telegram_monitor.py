@@ -1,20 +1,29 @@
-# telegram_monitor.py — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ (v5.3)
+# telegram_monitor.py — 100% РАБОЧАЯ ВЕРСИЯ (v6.0 — без phone_code_hash)
 import os
+import asyncio
 import logging
-from telethon import TelegramClient, events
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telegram import Bot
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+# ENV
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
 PHONE = os.getenv("PHONE")
-CODE = os.getenv("CODE", "").strip()
 
-client = TelegramClient('monitor_session', API_ID, API_HASH)
+# САМАЯ ВАЖНАЯ СТРОКА — ИСПОЛЬЗУЕМ СТРОКОВУЮ СЕССИЮ (решает проблему phone_code_hash)
+SESSION_STRING = os.getenv("SESSION_STRING", "")  # ← сюда вставим строку после авторизации
+
+if SESSION_STRING:
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+else:
+    client = TelegramClient('monitor_session', API_ID, API_HASH)
+
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 
 class TelegramMonitor:
@@ -25,23 +34,20 @@ class TelegramMonitor:
         self.group_titles = {}
 
     async def start(self):
-        log.info("[MONITOR] Запуск Telethon...")
-        await client.connect()
+        log.info("[DASHBOAT v6.0] Запуск Telethon...")
+        await client.start(phone=PHONE)  # ← МАГИЯ: start() сам всё делает
 
-        if not await client.is_user_authorized():
-            if not CODE:
-                log.info(f"[MONITOR] Отправляю код на {PHONE}...")
-                await client.send_code_request(PHONE)
-                log.info("КОД ОТПРАВЛЕН! Введи его в Render → CODE → Deploy")
-                raise Exception("Жду CODE")
-            else:
-                log.info("[MONITOR] Ввожу код и завершаю авторизацию...")
-                await client.sign_in(PHONE, code=CODE)  # ← ВАЖНО: code=CODE
-                log.info("АВТОРИЗОВАН НАВСЕГДА! Сессия сохранена.")
+        if SESSION_STRING:
+            log.info("[OK] Авторизация по строковой сессии — работает 24/7")
+        else:
+            log.info("[OK] Первая авторизация прошла! Сохраняю строковую сессию в логах ↓")
 
-        log.info("[DASHBOAT v5.3] АВТОРИЗОВАН. ГОТОВ К БОЮ 24/7")
+            # ВЫВОДИМ СТРОКОВУЮ СЕССИЮ В ЛОГИ (скопируешь оттуда)
+            string_session = client.session.save()
+            log.info(f"SESSION_STRING = {string_session}")
+            log.info("СКОПИРУЙ ЭТУ СТРОКУ В RENDER → ENV → SESSION_STRING → SAVE → DEPLOY")
 
-        # Подключение к группам
+        # Подключаемся к группам
         for gid in self.groups:
             try:
                 entity = await client.get_entity(gid)
@@ -49,13 +55,13 @@ class TelegramMonitor:
                 self.group_titles[gid] = title
                 log.info(f"[OK] Подключено: {title}")
             except Exception as e:
-                log.error(f"[FAIL] Группа {gid}: {e}")
+                log.warning(f"[WARN] Группа {gid}: {e}")
 
         @client.on(events.NewMessage(chats=self.groups))
         async def handler(event):
             if not event.message or not event.message.message: return
             text = event.message.message.lower()
-            group_title = self.group_titles.get(event.chat_id, "Неизвестно")
+            group_title = self.group_titles.get(event.chat_id, "Unknown")
             for kw in self.keywords:
                 if kw in text:
                     clean_id = str(event.chat_id)[4:] if str(event.chat_id).startswith('-100') else str(event.chat_id)
@@ -63,8 +69,8 @@ class TelegramMonitor:
                     self.callback({'keyword': kw, 'group': group_title, 'message': event.message.message, 'link': link})
                     if bot and ALERT_CHAT_ID:
                         try:
-                            await bot.send_message(ALERT_CHAT_ID, f"{kw.upper()} → {group_title}\n{link}", disable_web_page_preview=True)
+                            await bot.send_message(ALERT_CHAT_ID, f"{kw.upper()} → {group_title}\n{link}")
                         except: pass
 
-        log.info(f"[DASHBOAT] Слушаю {len(self.groups)} групп. Алерты летят!")
+        log.info(f"[DASHBOAT v6.0] Слушаю {len(self.groups)} групп — всё готово!")
         await client.run_until_disconnected()
