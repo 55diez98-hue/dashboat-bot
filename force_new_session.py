@@ -1,6 +1,7 @@
-import os
-if os.path.exists('monitor_session.session'):
-    os.remove('monitor_session.session')
-    print("СЕССИЯ УДАЛЕНА! Перезапусти мониторинг.")
+ import os
+session_file = 'monitor_session.session'
+if os.path.exists(session_file):
+    os.remove(session_file)
+    print(f"[FORCE] {session_file} УДАЛЕНА!")
 else:
-    print("Сессии нет — можно авторизоваться.")
+    print(f"[FORCE] {session_file} не найдена — можно авторизоваться.")
