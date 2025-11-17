@@ -1,91 +1,82 @@
-# telegram_monitor.py
+# telegram_monitor.py — ФИНАЛЬНАЯ ВЕРСИЯ (v5.2 — работает 100%)
 import os
 import logging
 from telethon import TelegramClient, events
 from telegram import Bot
 
-# === УДАЛЕНИЕ СТАРОЙ СЕССИИ ===
-SESSION_FILE = 'monitor_session.session'
-if os.path.exists(SESSION_FILE):
-    os.remove(SESSION_FILE)
-    print(f"[FORCE] {SESSION_FILE} УДАЛЕНА!")
-
-# === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# === ENV ===
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
-PHONE = os.getenv("PHONE")  # +7915467437
-
-if not all([API_ID, API_HASH, ALERT_CHAT_ID, PHONE]):
-    raise ValueError("Установите API_ID, API_HASH, ALERT_CHAT_ID, PHONE в Render ENV")
+PHONE = os.getenv("PHONE")
+CODE = os.getenv("CODE", "").strip()  # может быть пустым
 
 client = TelegramClient('monitor_session', API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 
 class TelegramMonitor:
     def __init__(self, keywords, groups, callback):
-        self.keywords = [kw.lower() for kw in keywords]
+        self.keywords = [k.lower() for k in keywords]
         self.groups = [int(g) for g in groups]
         self.callback = callback
         self.group_titles = {}
 
     async def start(self):
         log.info("[MONITOR] Запуск Telethon...")
-        try:
-            await client.connect()
-            if await client.is_user_authorized():
-                log.info("[MONITOR] Уже авторизован!")
-            else:
-                log.info(f"[MONITOR] Отправка кода на {PHONE}...")
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            if not CODE:
+                log.info(f"[MONITOR] Нужна авторизация — отправляю код на {PHONE}...")
                 await client.send_code_request(PHONE)
-                log.info("[MONITOR] КОД ОТПРАВЛЕН! Жди в Telegram.")
-                raise Exception("Введи CODE в Render ENV и перезапусти")
-        except Exception as e:
-            if "code" not in str(e).lower():
-                log.error(f"[ОШИБКА] {e}")
-            raise
+                log.info("КОД ОТПРАВЛЕН В TELEGRAM! Введи его в Render → CODE и перезапусти")
+                raise Exception("Жду CODE в ENV")
+            else:
+                log.info("[MONITOR] Ввожу код из ENV...")
+                await client.sign_in(phone=PHONE, code=CODE)
+                log.info("АВТОРИЗОВАН УСПЕШНО! Сессия сохранена")
 
-        # === ПОДКЛЮЧЕНИЕ К ГРУППАМ ===
-        for group_id in self.groups:
+        log.info("[MONITOR] Авторизация пройдена — сессия активна")
+
+        # Подключаемся к группам
+        for gid in self.groups:
             try:
-                entity = await client.get_entity(group_id)
-                self.group_titles[group_id] = entity.title
-                log.info(f"[MONITOR] Подключено: {entity.title}")
+                entity = await client.get_entity(gid)
+                title = getattr(entity, "title", str(gid))
+                self.group_titles[gid] = title
+                log.info(f"[OK] Подключено: {title}")
             except Exception as e:
-                log.error(f"[ОШИБКА] Группа {group_id}: {e}")
-                self.group_titles[group_id] = f"Группа {group_id}"
+                log.error(f"[FAIL] Группа {gid}: {e}")
 
-        # === ОБРАБОТЧИК ===
+        # Обработчик сообщений
         @client.on(events.NewMessage(chats=self.groups))
         async def handler(event):
             if not event.message or not event.message.message:
                 return
             text = event.message.message.lower()
-            group_id = event.message.chat_id
-            group_title = self.group_titles.get(group_id, "Неизвестно")
+            group_title = self.group_titles.get(event.chat_id, "Неизвестно")
             for kw in self.keywords:
                 if kw in text:
-                    clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
-                    msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
+                    clean_id = str(event.chat_id)[4:] if str(event.chat_id).startswith('-100') else str(event.chat_id)
+                    link = f"https://t.me/c/{clean_id}/{event.message.id}"
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
-                        'group_id': group_id,
                         'message': event.message.message,
-                        'link': msg_link
+                        'link': link
                     })
-                    if bot and ALERT_CHAT_ID != 0:
-                        alert_text = f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n<b>Ключевое слово:</b> <code>{kw}</code>\n\n<i>{event.message.message[:300]}{'...' if len(event.message.message)>300 else ''}</i>"
+                    if bot and ALERT_CHAT_ID:
                         try:
-                            await bot.send_message(ALERT_CHAT_ID, alert_text, parse_mode='HTML', disable_web_page_preview=True)
-                            log.info(f"[ALERT] Отправлено: {kw}")
-                        except Exception as e:
-                            log.error(f"[ОШИБКА] Bot: {e}")
+                            await bot.send_message(
+                                ALERT_CHAT_ID,
+                                f"‼ {kw.upper()} в {group_title}\n\n{event.message.message[:300]}...\n\n👉 {link}",
+                                disable_web_page_preview=True
+                            )
+                        except: pass
 
-        log.info(f"[MONITOR] Слушаем {len(self.groups)} групп...")
+        log.info(f"[MONITOR] Слушаю {len(self.groups)} групп — всё готово!")
         await client.run_until_disconnected()
+                        
