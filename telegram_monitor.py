@@ -1,24 +1,29 @@
 # telegram_monitor.py
-from telethon import TelegramClient, events
-from telegram import Bot
-import asyncio
 import os
 import logging
+from telethon import TelegramClient, events
+from telegram import Bot
 
-# === ЛОГИРОВАНИЕ ДЛЯ RENDER ===
+# === УДАЛЕНИЕ СТАРОЙ СЕССИИ ПРИ ЗАПУСКЕ ===
+SESSION_FILE = 'monitor_session.session'
+if os.path.exists(SESSION_FILE):
+    os.remove(SESSION_FILE)
+    print(f"[FORCE] {SESSION_FILE} УДАЛЕНА — новая авторизация!")
+
+# === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# === ENV (обязательно в Render) ===
+# === ENV ===
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
-PHONE = os.getenv("PHONE")  # +995xxxxxxxxx — твой номер
-CODE = os.getenv("CODE")    # 12345 — код из SMS (только для первой авторизации)
+PHONE = os.getenv("PHONE")  # +7915467437
+CODE = os.getenv("CODE")    # 12345 (только для первой авторизации)
 
-if not all([API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID]):
-    raise ValueError("Установите API_ID, API_HASH, BOT_TOKEN, ALERT_CHAT_ID в Render")
+if not all([API_ID, API_HASH, ALERT_CHAT_ID]):
+    raise ValueError("Установите API_ID, API_HASH, ALERT_CHAT_ID в Render ENV")
 
 client = TelegramClient('monitor_session', API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
@@ -33,18 +38,15 @@ class TelegramMonitor:
     async def start(self):
         log.info("[MONITOR] Запуск Telethon...")
         try:
-            # === АВТО-АВТОРИЗАЦИЯ ЧЕРЕЗ ENV (без input) ===
+            # === АВТОРИЗАЦИЯ ===
             if os.path.exists('monitor_session.session'):
-                # Сессия есть — подключаемся
                 await client.connect()
                 if not await client.is_user_authorized():
-                    raise Exception("Сессия не авторизована — удалите monitor_session.session и добавьте CODE в ENV")
+                    raise Exception("Сессия не авторизована — удалите monitor_session.session")
                 log.info("[MONITOR] Авторизован (по сессии)!")
             else:
-                # Первая авторизация
                 if not PHONE or not CODE:
                     raise Exception("Добавьте PHONE и CODE в Render ENV для первой авторизации")
-                
                 await client.start(phone=PHONE)
                 await client.sign_in(phone=PHONE, code=CODE)
                 log.info("[MONITOR] Авторизован (по коду из ENV)!")
@@ -52,7 +54,7 @@ class TelegramMonitor:
             log.error(f"[ОШИБКА] Авторизация: {e}")
             raise
 
-        # Получаем названия групп
+        # === ПОДКЛЮЧЕНИЕ К ГРУППАМ ===
         for group_id in self.groups:
             try:
                 entity = await client.get_entity(group_id)
@@ -62,6 +64,7 @@ class TelegramMonitor:
                 log.error(f"[ОШИБКА] Группа {group_id}: {e}")
                 self.group_titles[group_id] = f"Группа {group_id}"
 
+        # === ОБРАБОТЧИК СООБЩЕНИЙ ===
         @client.on(events.NewMessage(chats=self.groups))
         async def handler(event):
             if not event.message or not event.message.message:
@@ -73,11 +76,9 @@ class TelegramMonitor:
 
             for kw in self.keywords:
                 if kw in text:
-                    # Формируем ссылку
                     clean_id = str(group_id)[4:] if str(group_id).startswith('-100') else str(group_id)
                     msg_link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
-                    # Сохраняем в JSON
                     self.callback({
                         'keyword': kw,
                         'group': group_title,
@@ -86,14 +87,12 @@ class TelegramMonitor:
                         'link': msg_link
                     })
 
-                    # Отправляем алерт
                     if bot and ALERT_CHAT_ID != 0:
                         alert_text = (
                             f"<b>Найдено:</b> <a href='{msg_link}'>{group_title}</a>\n"
                             f"<b>Ключевое слово:</b> <code>{kw}</code>\n\n"
                             f"<i>{event.message.message[:300]}{'...' if len(event.message.message) > 300 else ''}</i>"
                         )
-
                         try:
                             await bot.send_message(
                                 chat_id=ALERT_CHAT_ID,
