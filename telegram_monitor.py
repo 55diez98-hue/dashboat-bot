@@ -19,7 +19,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID"))
-PHONE = os.getenv("PHONE")  # +7915467437
+PHONE = os.getenv("PHONE")  # +79115467437
 CODE = os.getenv("CODE")    # 12345 (только для первой авторизации)
 
 if not all([API_ID, API_HASH, ALERT_CHAT_ID]):
