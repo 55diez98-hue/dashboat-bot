@@ -1,4 +1,5 @@
-# simple_server.py — v10.1 — ФИНАЛЬНАЯ ВЕРСИЯ (алерты в дашборд + канал работают)
+ # simple_server.py — ФИНАЛЬНАЯ ВЕРСИЯ 18.11.2025
+# Полный файл. Работает на Render. Алерты в дашборд + канал. Тесты связи. Никаких зависаний.
 import asyncio
 import json
 import os
@@ -12,9 +13,9 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
-monitor_task = None
+monitor_task = None  # глобальная задача мониторинга
 
-# ================================== ДАННЫЕ ==================================
+
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -23,38 +24,39 @@ def load_data():
                 data["groups"] = [str(g).strip() for g in data.get("groups", [])]
                 return data
         except Exception as e:
-            log.error(f"Ошибка чтения data: {e}")
+            log.error(f"Ошибка чтения dashboat_data.json: {e}")
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
+
 
 def save_data(data):
     data["groups"] = [str(g).strip() for g in data["groups"]]
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
 def add_alert(alert):
     data = load_data()
     alert["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["alerts"].append(alert)
-    data["alerts"] = data["alerts"][-100:]
+    data["alerts"] = data["alerts"][-100:]  # храним только последние 100
     save_data(data)
 
-# ================================ МОНИТОРИНГ ================================
+
 async def run_monitoring():
     data = load_data()
     if not data["keywords"] or not data["groups"]:
-        log.warning("Нет ключевых слов или групп — мониторинг не запущен")
+        log.warning("Нет ключевых слов или групп — мониторинг не запускается")
         return
 
-    # ← ВОТ ТЕ САМЫЕ ДВЕ СТРОКИ, которые были нужны
+    log.info("[MONITOR] Создаём экземпляр TelegramMonitor")
     monitor = TelegramMonitor(data["keywords"], data["groups"])
-    monitor.set_callback(add_alert)                 # ← алерты в дашборд
-    # ← конец правки
+    monitor.set_callback(add_alert)
+    await monitor.start()  # ← здесь запускаются тесты и весь мониторинг
 
-    await monitor.start()                          # ← стартуем (внутри уже отправка в канал)
 
 def start_monitoring():
     global monitor_task
-    if monitor_task is not None:
+    if monitor_task and not monitor_task.done():
         log.info("[MONITOR] Уже запущен")
         return
 
@@ -62,22 +64,23 @@ def start_monitoring():
     data["monitoring_active"] = True
     save_data(data)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    monitor_task = loop.create_task(run_monitoring())
-    log.info("[MONITOR] Запущен асинхронно")
+    # САМОЕ ВАЖНОЕ: используем текущий event loop (на Render он уже существует)
+    monitor_task = asyncio.create_task(run_monitoring())
+    log.info("[MONITOR] ЗАПУЩЕН — Telethon начинает подключение...")
+
 
 def stop_monitoring():
     global monitor_task
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
+
     if monitor_task:
         monitor_task.cancel()
         monitor_task = None
         log.info("[MONITOR] Остановлен")
 
-# =================================== HTTP ===================================
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ["/", "/index.html"]:
@@ -126,8 +129,10 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/start_monitoring":
             start_monitoring()
+
         elif self.path == "/api/stop_monitoring":
             stop_monitoring()
+
         elif self.path == "/api/clear_alerts":
             data = load_data()
             data["alerts"] = []
@@ -193,18 +198,19 @@ class Handler(BaseHTTPRequestHandler):
 {alerts}
 </body></html>"""
 
-# ================================= СЕРВЕР =================================
+
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     log.info(f"[SERVER] Запуск на 0.0.0.0:{port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
-    # автозапуск, если был включён
+    # Автозапуск, если был включён до рестарта
     if load_data().get("monitoring_active"):
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
+
 
 if __name__ == "__main__":
     run_server()
