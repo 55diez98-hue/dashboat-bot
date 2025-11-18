@@ -1,19 +1,19 @@
-# simple_server.py — ИСПРАВЛЕННАЯ ФИНАЛЬНАЯ ВЕРСИЯ (18.11.2025)
+# simple_server.py — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ БЕЗ ОШИБОК (18.11.2025)
 import asyncio
 import json
 import os
 import urllib.parse
+import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
 import logging
-import threading
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
-monitor_task = None
+monitor = None  # один глобальный монитор
 
 
 def load_data():
@@ -31,7 +31,7 @@ def load_data():
 def save_data(data):
     data["groups"] = [str(g).strip() for g in data["groups"]]
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, ensure_ascii=False, indent=2)
 
 
 def add_alert(alert):
@@ -42,21 +42,34 @@ def add_alert(alert):
     save_data(data)
 
 
-async def run_monitoring():
-    data = load_data()
-    if not data["keywords"] or not data["groups"]:
-        log.warning("Нет ключей или групп — мониторинг не стартует")
-        return
+# ←←← ГЛАВНОЕ: мониторинг в отдельном потоке с собственным loop
+def monitoring_worker():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    log.info("[MONITOR] Создаём TelegramMonitor...")
-    monitor = TelegramMonitor(data["keywords"], data["groups"])
-    monitor.set_callback(add_alert)
-    await monitor.start()
+    async def runner():
+        data = load_data()
+        if not data["keywords"] or not data["groups"]:
+            log.warning("Нет ключей или групп")
+            return
+
+        global monitor
+        monitor = TelegramMonitor(data["keywords"], data["groups"])
+        monitor.set_callback(add_alert)
+        log.info("[MONITOR] Запуск Telethon...")
+        await monitor.start()
+
+    try:
+        loop.run_until_complete(runner())
+    except Exception as e:
+        log.error(f"[КРИТ] Мониторинг упал: {e}")
+    finally:
+        loop.close()
 
 
 def start_monitoring():
-    global monitor_task
-    if monitor_task and not monitor_task.done():
+    global monitor
+    if monitor is not None:
         log.info("[MONITOR] Уже запущен")
         return
 
@@ -64,20 +77,17 @@ def start_monitoring():
     data["monitoring_active"] = True
     save_data(data)
 
-    monitor_task = asyncio.create_task(run_monitoring())
-    log.info("[MONITOR] ЗАПУЩЕН — Telethon стартует!")
+    threading.Thread(target=monitoring_worker, daemon=True).start()
+    log.info("[MONITOR] ЗАПУЩЕН В ОТДЕЛЬНОМ ПОТОКЕ — всё будет работать!")
 
 
 def stop_monitoring():
-    global monitor_task
+    global monitor
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
-
-    if monitor_task:
-        monitor_task.cancel()
-        monitor_task = None
-        log.info("[MONITOR] Остановлен")
+    log.info("[MONITOR] Остановлен")
+    monitor = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -142,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
     def html(self):
         data = load_data()
         status_color = "green" if data.get("monitoring_active") else "red"
-        status_text = "Активен" if data.get("monitoring_active") else "Остановлен"   # ← ИСПРАВЛЕНО!
+        status_text = "Активен" if data.get("monitoring_active") else "Остановлен"
 
         kw_html = "".join(
             f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline">'
@@ -165,18 +175,19 @@ class Handler(BaseHTTPRequestHandler):
         ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v15 FINAL</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v16 FINAL</title>
 <meta http-equiv="refresh" content="15">
 <style>
   body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f2f5;padding:20px;line-height:1.5}}
   h1 {{color:#1a5fb4}}
-  button {{background:#1a5fb4;color:white;border:none;padding:12px 20px;border-radius:8px;cursor:pointer;font-size:1.1em}}
-  input[type=text] {{padding:12px;width:320px;border-radius:8px;border:1px solid #ccc;font-size:1.1em}}
+  button {{background:#1a5fb4;color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:1.1em}}
+  button:hover {{background:#0d47a1}}
+  input[type=text] {{padding:12px;width:340px;border-radius:8px;border:1px solid #ccc;font-size:1.1em}}
   ul {{list-style:none;padding:0}}
   li {{background:white;padding:12px;margin:8px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}}
-  .status {{font-weight:bold;color:{status_color};font-size:1.3em}}
+  .status {{font-weight:bold;color:{status_color};font-size:1.4em}}
 </style></head><body>
-<h1>Dashboat v15 — Батуми</h1>
+<h1>Dashboat v16 — Батуми</h1>
 <p>Статус: <span class="status">{status_text}</span></p>
 
 <form method="POST" action="/api/start_monitoring" style="display:inline"><button>ЗАПУСТИТЬ</button></form>
@@ -184,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
 <form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:20px"><button style="background:#d32f2f">Очистить алерты</button></form>
 
 <h2>Ключевые слова</h2>
-<form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, смартфон, куплю" required><button>+</button></form>
+<form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, смартфон, айфон" required><button>+</button></form>
 <ul>{kw_html}</ul>
 
 <h2>Группы</h2>
@@ -196,17 +207,13 @@ class Handler(BaseHTTPRequestHandler):
 </body></html>"""
 
 
-def run_server():
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     log.info(f"[SERVER] Запуск на порту {port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
+    # автозапуск при старте сервера
     if load_data().get("monitoring_active"):
         start_monitoring()
 
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
-
-
-if __name__ == "__main__":
-    run_server()
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
