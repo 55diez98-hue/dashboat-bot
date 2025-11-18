@@ -1,4 +1,5 @@
-# simple_server.py — ФИНАЛЬНАЯ ВЕРСИЯ 18.11.2025 (работает на Render)
+# simple_server.py — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ (18.11.2025)
+# Работает на Render. Запуск в отдельном потоке. Никаких RuntimeError: no running event loop
 import asyncio
 import json
 import os
@@ -14,7 +15,6 @@ log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
 monitor_thread = None
-stop_event = threading.Event()
 
 
 def load_data():
@@ -43,25 +43,27 @@ def add_alert(alert):
     save_data(data)
 
 
-def monitoring_loop():
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+#  ЭТО ГЛАВНОЕ — МОНИТОРИНГ В ОТДЕЛЬНОМ ПОТОКЕ С СОБСТВЕННЫМ LOOP
+def monitoring_worker():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    async def run():
+    async def runner():
         data = load_data()
         if not data["keywords"] or not data["groups"]:
-            log.warning("Нет ключевых слов или групп — мониторинг остановлен")
+            log.warning("Нет ключевых слов или групп — мониторинг не стартует")
             return
 
-        log.info("[MONITOR] Запуск TelegramMonitor в отдельном потоке")
+        log.info("[MONITOR] Запускаем TelegramMonitor в отдельном потоке")
         monitor = TelegramMonitor(data["keywords"], data["groups"])
         monitor.set_callback(add_alert)
-        await monitor.start()
+        await monitor.start()   # ← здесь тесты и вся работа
 
     try:
-        loop.run_until_complete(run())
+        loop.run_until_complete(runner())
     except Exception as e:
-        log.error(f"[КРИТИЧЕСКАЯ ОШИБКА В ПОТОКЕ] {e}")
+        log.error(f"[КРИТ] Ошибка в мониторинге: {e}")
     finally:
         loop.close()
 
@@ -69,17 +71,16 @@ def monitoring_loop():
 def start_monitoring():
     global monitor_thread
     if monitor_thread and monitor_thread.is_alive():
-        log.info("[MONITOR] Уже запущен")
+        log.info("[MONITOR] Уже работает")
         return
 
     data = load_data()
     data["monitoring_active"] = True
     save_data(data)
 
-    stop_event.clear()
-    monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
+    monitor_thread = threading.Thread(target=monitoring_worker, daemon=True)
     monitor_thread.start()
-    log.info("[MONITOR] Запущен в отдельном потоке — Telethon стартует!")
+    log.info("[MONITOR] УСПЕШНО ЗАПУЩЕН В ОТДЕЛЬНОМ ПОТОКЕ — Telethon стартует!")
 
 
 def stop_monitoring():
@@ -88,11 +89,12 @@ def stop_monitoring():
     data["monitoring_active"] = False
     save_data(data)
 
-    stop_event.set()
-    if monitor_thread:
-        monitor_thread.join(timeout=5)
-        monitor_thread = None
-        log.info("[MONITOR] Остановлен")
+    if monitor_thread and monitor_thread.is_alive():
+        # Telethon сам завершится при отключении клиента
+        log.info("[MONITOR] Остановка...")
+        # ничего больше не делаем — поток завершится сам
+    monitor_thread = None
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,19 +115,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/add_keyword":
             kw = params.get("keyword", [""])[0].strip().lower()
-            if kw:
+            if kw and kw not in load_data()["keywords"]:
                 data = load_data()
-                if kw not in data["keywords"]:
-                    data["keywords"].append(kw)
-                    save_data(data)
+                data["keywords"].append(kw)
+                save_data(data)
 
         elif self.path == "/api/add_group":
             g = params.get("group", [""])[0].strip()
-            if g:
+            if g and g not in load_data()["groups"]:
                 data = load_data()
-                if g not in data["groups"]:
-                    data["groups"].append(g)
-                    save_data(data)
+                data["groups"].append(g)
+                save_data(data)
 
         elif self.path == "/api/delete_keyword":
             kw = params.get("keyword", [""])[0]
@@ -177,12 +177,12 @@ class Handler(BaseHTTPRequestHandler):
             f'<div style="border:1px solid #ddd;padding:12px;margin:10px 0;border-radius:8px;background:#fff">'
             f'<b>{a["timestamp"]}</b><br>'
             f'<a href="{a["link"]}" target="_blank">{a["keyword"].upper()} → {a["group"]}</a><br>'
-            f'<small>{a["message"][:150]}</small></div>'
+            f'<small>{a["message"][:150]}{"..." if len(a["message"])>150 else ""}</small></div>'
             for a in reversed(data["alerts"][-15:])
         ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v11</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v12</title>
 <meta http-equiv="refresh" content="15">
 <style>
   body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f2f5;padding:20px;line-height:1.5}}
@@ -191,12 +191,13 @@ class Handler(BaseHTTPRequestHandler):
   button:hover {{background:#0d47a1}}
   input[type=text] {{padding:10px;width:300px;border-radius:8px;border:1px solid #ccc}}
   ul {{list-style:none;padding:0}}
-  li {{background:white;padding:10px;margin:5px 0;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;justify-content:space-between;align-items:center}}
+  li {{background:white;padding:10px;margin:5px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}}
   .status {{font-weight:bold;color:{status_color}}}
 </style></head><body>
-<h1>Dashboat v11</h1>
-<p>Статус: <span class="status">{status_text}</span></p>
-<form method="POST" action="/api/start_monitoring" style="display:inline"><button>Запустить</button></form>
+<h1>Dashboat v12 — Батуми</h1>
+<p>Статус мониторинга: <span class="status">{status_text}</span></p>
+
+<form method="POST" action="/api/start_monitoring" style="display:inline"><button>ЗАПУСТИТЬ</button></form>
 <form method="POST" action="/api/stop_monitoring" style="display:inline"><button>Остановить</button></form>
 <form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:15px"><button style="background:#d32f2f">Очистить алерты</button></form>
 
@@ -208,14 +209,18 @@ class Handler(BaseHTTPRequestHandler):
 <form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890" required><button>+</button></form>
 <ul>{grp_html}</ul>
 
-<h2>Алерты</h2>
+<h2>Алерты (последние 15)</h2>
 {alerts}
+
+<div style="margin-top:100px;color:#888;font-size:0.9em;text-align:center">
+Dashboat v12 | @Shmelibze | Батуми 2025
+</div>
 </body></html>"""
 
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
-    log.info(f"[SERVER] Запуск на 0.0.0.0:{port}")
+    log.info(f"[SERVER] Запуск на порту {port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
     if load_data().get("monitoring_active"):
