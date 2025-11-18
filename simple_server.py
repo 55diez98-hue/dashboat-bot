@@ -1,5 +1,4 @@
-# simple_server.py — v10.0 — 100% рабочий с StringSession и алертами в дашборд + канал
-import threading
+# simple_server.py — v10.1 — ФИНАЛЬНАЯ ВЕРСИЯ (алерты в дашборд + канал работают)
 import asyncio
 import json
 import os
@@ -15,6 +14,7 @@ log = logging.getLogger(__name__)
 DATA_FILE = "dashboat_data.json"
 monitor_task = None
 
+# ================================== ДАННЫЕ ==================================
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -35,21 +35,27 @@ def add_alert(alert):
     data = load_data()
     alert["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["alerts"].append(alert)
-    data["alerts"] = data["alerts"][-100:]  # последние 100
+    data["alerts"] = data["alerts"][-100:]
     save_data(data)
 
+# ================================ МОНИТОРИНГ ================================
 async def run_monitoring():
     data = load_data()
     if not data["keywords"] or not data["groups"]:
         log.warning("Нет ключевых слов или групп — мониторинг не запущен")
         return
 
+    # ← ВОТ ТЕ САМЫЕ ДВЕ СТРОКИ, которые были нужны
     monitor = TelegramMonitor(data["keywords"], data["groups"])
-    await monitor.start(add_alert)  # передаём callback
+    monitor.set_callback(add_alert)                 # ← алерты в дашборд
+    # ← конец правки
+
+    await monitor.start()                          # ← стартуем (внутри уже отправка в канал)
 
 def start_monitoring():
     global monitor_task
     if monitor_task is not None:
+        log.info("[MONITOR] Уже запущен")
         return
 
     data = load_data()
@@ -71,6 +77,7 @@ def stop_monitoring():
         monitor_task = None
         log.info("[MONITOR] Остановлен")
 
+# =================================== HTTP ===================================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ["/", "/index.html"]:
@@ -78,11 +85,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(self.html().encode("utf-8"))
-        elif self.path == "/api/data":
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(load_data(), ensure_ascii=False).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -99,6 +101,7 @@ class Handler(BaseHTTPRequestHandler):
                 if kw not in data["keywords"]:
                     data["keywords"].append(kw)
                     save_data(data)
+
         elif self.path == "/api/add_group":
             g = params.get("group", [""])[0].strip()
             if g:
@@ -106,18 +109,21 @@ class Handler(BaseHTTPRequestHandler):
                 if g not in data["groups"]:
                     data["groups"].append(g)
                     save_data(data)
+
         elif self.path == "/api/delete_keyword":
             kw = params.get("keyword", [""])[0]
             data = load_data()
             if kw in data["keywords"]:
                 data["keywords"].remove(kw)
                 save_data(data)
+
         elif self.path == "/api/delete_group":
             g = params.get("group", [""])[0]
             data = load_data()
             if g in data["groups"]:
                 data["groups"].remove(g)
                 save_data(data)
+
         elif self.path == "/api/start_monitoring":
             start_monitoring()
         elif self.path == "/api/stop_monitoring":
@@ -135,37 +141,45 @@ class Handler(BaseHTTPRequestHandler):
         data = load_data()
         status_color = "green" if data.get("monitoring_active") else "red"
         status_text = "Активен" if data.get("monitoring_active") else "Остановлен"
-        kw_html = "".join(f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline"><input type="hidden" name="keyword" value="{kw}"><button type="submit">×</button></form></li>' for kw in data["keywords"]) or "<li>—</li>"
-        grp_html = "".join(f'<li>{g} <form method="POST" action="/api/delete_group" style="display:inline"><input type="hidden" name="group" value="{g}"><button type="submit">×</button></form></li>' for g in data["groups"]) or "<li>—</li>"
+
+        kw_html = "".join(
+            f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline">'
+            f'<input type="hidden" name="keyword" value="{kw}"><button type="submit">×</button></form></li>'
+            for kw in data["keywords"]
+        ) or "<li>—</li>"
+
+        grp_html = "".join(
+            f'<li>{g} <form method="POST" action="/api/delete_group" style="display:inline">'
+            f'<input type="hidden" name="group" value="{g}"><button type="submit">×</button></form></li>'
+            for g in data["groups"]
+        ) or "<li>—</li>"
+
         alerts = "".join(
-            f'<div style="border:1px solid #ddd;padding:10px;margin:8px 0;border-radius:8px;background:#f8f9fa">'
+            f'<div style="border:1px solid #ddd;padding:12px;margin:10px 0;border-radius:8px;background:#fff">'
             f'<b>{a["timestamp"]}</b><br>'
-            f'<a href="{a["link"]}" target="_blank">{a["keyword"]} в {a["group"]}</a><br>'
-            f'<small>{a["message"]}</small></div>'
-            for a in reversed(data["alerts"][-15:])  # последние 15, новые сверху
+            f'<a href="{a["link"]}" target="_blank">{a["keyword"].upper()} → {a["group"]}</a><br>'
+            f'<small>{a["message"][:150]}</small></div>'
+            for a in reversed(data["alerts"][-15:])
         ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v10</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v10.1</title>
 <meta http-equiv="refresh" content="15">
 <style>
-  body {{font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; background:#f0f2f5; padding:20px; line-height:1.5}}
+  body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f2f5;padding:20px;line-height:1.5}}
   h1 {{color:#1a5fb4}}
-  button {{background:#1a5fb4; color:white; border:none; padding:10px 18px; border-radius:8px; cursor:pointer; font-size:16px}}
+  button {{background:#1a5fb4;color:white;border:none;padding:10px 18px;border-radius:8px;cursor:pointer}}
   button:hover {{background:#0d47a1}}
-  input[type=text] {{padding:10px; width:300px; border-radius:8px; border:1px solid #ccc}}
-  ul {{list-style:none; padding:0}}
-  li {{background:white; padding:10px; margin:5px 0; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
-  .status {{font-weight:bold; color:{status_color}}}
-  .footer {{margin-top:80px; text-align:center; color:#666; font-size:0.9em}}
-</style>
-</head><body>
-<h1>Dashboat v10</h1>
+  input[type=text] {{padding:10px;width:300px;border-radius:8px;border:1px solid #ccc}}
+  ul {{list-style:none;padding:0}}
+  li {{background:white;padding:10px;margin:5px 0;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;justify-content:space-between;align-items:center}}
+  .status {{font-weight:bold;color:{status_color}}}
+</style></head><body>
+<h1>Dashboat v10.1</h1>
 <p>Статус: <span class="status">{status_text}</span></p>
-
 <form method="POST" action="/api/start_monitoring" style="display:inline"><button>Запустить</button></form>
 <form method="POST" action="/api/stop_monitoring" style="display:inline"><button>Остановить</button></form>
-<form method="POST" action="/api/clear_alerts" style="display:inline; margin-left:20px"><button style="background:#d32f2f">Очистить алерты</button></form>
+<form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:15px"><button style="background:#d32f2f">Очистить алерты</button></form>
 
 <h2>Ключевые слова</h2>
 <form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="масляный" required><button>+</button></form>
@@ -175,20 +189,18 @@ class Handler(BaseHTTPRequestHandler):
 <form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890" required><button>+</button></form>
 <ul>{grp_html}</ul>
 
-<h2>Алерты (последние)</h2>
+<h2>Алерты</h2>
 {alerts}
-
-<div class="footer">Dashboat v10 | @Shmelibze | Батуми | 2025</div>
 </body></html>"""
 
+# ================================= СЕРВЕР =================================
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     log.info(f"[SERVER] Запуск на 0.0.0.0:{port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
-    # Автозапуск при старте
-    data = load_data()
-    if data.get("monitoring_active"):
+    # автозапуск, если был включён
+    if load_data().get("monitoring_active"):
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), Handler)
