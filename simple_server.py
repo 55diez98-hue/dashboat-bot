@@ -1,9 +1,9 @@
- # simple_server.py — ФИНАЛЬНАЯ ВЕРСИЯ 18.11.2025
-# Полный файл. Работает на Render. Алерты в дашборд + канал. Тесты связи. Никаких зависаний.
+# simple_server.py — ФИНАЛЬНАЯ ВЕРСИЯ 18.11.2025 (работает на Render)
 import asyncio
 import json
 import os
 import urllib.parse
+import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
@@ -13,7 +13,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
-monitor_task = None  # глобальная задача мониторинга
+monitor_thread = None
+stop_event = threading.Event()
 
 
 def load_data():
@@ -38,25 +39,36 @@ def add_alert(alert):
     data = load_data()
     alert["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["alerts"].append(alert)
-    data["alerts"] = data["alerts"][-100:]  # храним только последние 100
+    data["alerts"] = data["alerts"][-100:]
     save_data(data)
 
 
-async def run_monitoring():
-    data = load_data()
-    if not data["keywords"] or not data["groups"]:
-        log.warning("Нет ключевых слов или групп — мониторинг не запускается")
-        return
+def monitoring_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-    log.info("[MONITOR] Создаём экземпляр TelegramMonitor")
-    monitor = TelegramMonitor(data["keywords"], data["groups"])
-    monitor.set_callback(add_alert)
-    await monitor.start()  # ← здесь запускаются тесты и весь мониторинг
+    async def run():
+        data = load_data()
+        if not data["keywords"] or not data["groups"]:
+            log.warning("Нет ключевых слов или групп — мониторинг остановлен")
+            return
+
+        log.info("[MONITOR] Запуск TelegramMonitor в отдельном потоке")
+        monitor = TelegramMonitor(data["keywords"], data["groups"])
+        monitor.set_callback(add_alert)
+        await monitor.start()
+
+    try:
+        loop.run_until_complete(run())
+    except Exception as e:
+        log.error(f"[КРИТИЧЕСКАЯ ОШИБКА В ПОТОКЕ] {e}")
+    finally:
+        loop.close()
 
 
 def start_monitoring():
-    global monitor_task
-    if monitor_task and not monitor_task.done():
+    global monitor_thread
+    if monitor_thread and monitor_thread.is_alive():
         log.info("[MONITOR] Уже запущен")
         return
 
@@ -64,20 +76,22 @@ def start_monitoring():
     data["monitoring_active"] = True
     save_data(data)
 
-    # САМОЕ ВАЖНОЕ: используем текущий event loop (на Render он уже существует)
-    monitor_task = asyncio.create_task(run_monitoring())
-    log.info("[MONITOR] ЗАПУЩЕН — Telethon начинает подключение...")
+    stop_event.clear()
+    monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
+    monitor_thread.start()
+    log.info("[MONITOR] Запущен в отдельном потоке — Telethon стартует!")
 
 
 def stop_monitoring():
-    global monitor_task
+    global monitor_thread
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
 
-    if monitor_task:
-        monitor_task.cancel()
-        monitor_task = None
+    stop_event.set()
+    if monitor_thread:
+        monitor_thread.join(timeout=5)
+        monitor_thread = None
         log.info("[MONITOR] Остановлен")
 
 
@@ -168,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v10.1</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v11</title>
 <meta http-equiv="refresh" content="15">
 <style>
   body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f2f5;padding:20px;line-height:1.5}}
@@ -180,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
   li {{background:white;padding:10px;margin:5px 0;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;justify-content:space-between;align-items:center}}
   .status {{font-weight:bold;color:{status_color}}}
 </style></head><body>
-<h1>Dashboat v10.1</h1>
+<h1>Dashboat v11</h1>
 <p>Статус: <span class="status">{status_text}</span></p>
 <form method="POST" action="/api/start_monitoring" style="display:inline"><button>Запустить</button></form>
 <form method="POST" action="/api/stop_monitoring" style="display:inline"><button>Остановить</button></form>
@@ -204,7 +218,6 @@ def run_server():
     log.info(f"[SERVER] Запуск на 0.0.0.0:{port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
-    # Автозапуск, если был включён до рестарта
     if load_data().get("monitoring_active"):
         start_monitoring()
 
