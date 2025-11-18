@@ -1,4 +1,4 @@
-# telegram_monitor.py — v10.2 — С ЖЁСТКИМ ТЕСТОМ СВЯЗИ (18.11.2025)
+# telegram_monitor.py — ФИНАЛЬНАЯ ВЕРСИЯ (18.11.2025) — алерты и в канал, и в дашборд
 import os
 import logging
 from telethon import TelegramClient, events
@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID")) if os.getenv("ALERT_CHAT_ID") else None
 
 if not all([API_ID, API_HASH, SESSION_STRING]):
-    raise ValueError("Нужны API_ID, API_HASH, SESSION_STRING в переменных окружения!")
+    raise ValueError("Нужны API_ID, API_HASH, SESSION_STRING!")
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
@@ -31,39 +31,22 @@ class TelegramMonitor:
         self.callback = callback
 
     async def start(self):
-        log.info("[DASHBOAT v10.2] Запуск с тестом связи...")
+        log.info("[DASHBOAT] Подключение Telethon...")
+        await client.start()
+        log.info("[SUCCESS] Telethon подключился!")
 
-        # === ПОДКЛЮЧЕНИЕ ===
-        try:
-            await client.start()
-            log.info("[SUCCESS] Telethon успешно подключился!")
-        except Exception as e:
-            log.error(f"[КРИТИЧЕСКАЯ ОШИБКА] client.start() упал: {e}")
-            return
-
-        # === ТЕСТ 1: Кто я? ===
+        # Тестовые сообщения
         try:
             me = await client.get_me()
-            log.info(f"[ТЕСТ] Аккаунт живой: {me.first_name} (@{me.username or 'нет'}) | {me.phone}")
+            log.info(f"[ТЕСТ] Аккаунт: {me.first_name} @{me.username}")
+            await client.send_message("me", "DASHBOAT v12 ЗАПУЩЕН — всё работает! 18.11.2025")
+            if bot and ALERT_CHAT_ID:
+                await bot.send_message(ALERT_CHAT_ID, "DASHBOAT v12 онлайн — алерты летят и в дашборд, и в канал!")
+            log.info("[ТЕСТ] Тестовые сообщения отправлены")
         except Exception as e:
-            log.error(f"[ТЕСТ ПРОВАЛЕН] Не смог получить данные аккаунта: {e}")
+            log.error(f"[ТЕСТ] Ошибка теста: {e}")
 
-        # === ТЕСТ 2: Пишу в Избранное ===
-        try:
-            await client.send_message("me", "DASHBOAT ТЕСТ УСПЕШЕН! Telethon работает — 18.11.2025")
-            log.info("[ТЕСТ] Сообщение отправлено в «Избранное»!")
-        except Exception as e:
-            log.error(f"[ТЕСТ ПРОВАЛЕН] Не смог написать в Избранное: {e}")
-
-        # === ТЕСТ 3: Пишу в канал ===
-        if bot and ALERT_CHAT_ID:
-            try:
-                await bot.send_message(ALERT_CHAT_ID, "DASHBOAT ТЕСТ — Telethon жив и готов ловить алерты! 18.11.2025")
-                log.info("[ТЕСТ] Сообщение отправлено в канал алертов!")
-            except Exception as e:
-                log.error(f"[ТЕСТ ПРОВАЛЕН] Не смог написать в канал: {e}")
-
-        # === Подключаем группы ===
+        # Подключаем группы
         for gid in self.groups:
             try:
                 entity = await client.get_entity(gid)
@@ -71,26 +54,22 @@ class TelegramMonitor:
                 self.group_titles[gid] = title
                 log.info(f"[OK] Подключено: {title}")
             except Exception as e:
-                log.warning(f"[WARN] Не удалось подключить группу {gid}: {e}")
+                log.warning(f"[WARN] Группа {gid}: {e}")
 
-        # === Обработчик новых сообщений ===
         @client.on(events.NewMessage(chats=self.groups))
         async def handler(event):
             if not event.message or not event.message.message:
                 return
-
             text = event.message.message.lower()
             group_title = self.group_titles.get(event.chat_id, "Unknown")
-
-            # Логируем ВСЁ, что приходит (чтобы видеть в логах Render)
-            log.info(f"[НОВОЕ СООБЩЕНИЕ] {group_title}: {event.message.message[:100]}")
+            log.info(f"[НОВОЕ] {group_title}: {event.message.message[:70]}")
 
             for kw in self.keywords:
                 if kw in text:
                     clean_id = str(event.chat_id)[4:] if str(event.chat_id).startswith('-100') else str(event.chat_id)
                     link = f"https://t.me/c/{clean_id}/{event.message.id}"
 
-                    log.info(f"АЛЕРТ! Найдено «{kw.upper()}» в {group_title}")
+                    log.info(f"АЛЕРТ! «{kw.upper()}» в {group_title}")
 
                     alert_data = {
                         "keyword": kw,
@@ -99,9 +78,11 @@ class TelegramMonitor:
                         "link": link
                     }
 
+                    # ←←← ЭТО ВАЖНО: отправляем в дашборд
                     if self.callback:
                         self.callback(alert_data)
 
+                    # ←←← Отправляем в канал
                     if bot and ALERT_CHAT_ID:
                         try:
                             await bot.send_message(
@@ -112,5 +93,5 @@ class TelegramMonitor:
                         except Exception as e:
                             log.error(f"Ошибка отправки в канал: {e}")
 
-        log.info(f"[DASHBOAT v10.2] Мониторим {len(self.groups)} групп — тесты пройдены, ждём алерты!")
+        log.info(f"[DASHBOAT v12] Мониторим {len(self.groups)} групп — всё готово!")
         await client.run_until_disconnected()
