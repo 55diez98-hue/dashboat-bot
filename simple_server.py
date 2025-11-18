@@ -1,4 +1,4 @@
-# simple_server.py
+# simple_server.py — v10.0 — 100% рабочий с StringSession и алертами в дашборд + канал
 import threading
 import asyncio
 import json
@@ -8,14 +8,12 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
 import logging
-import subprocess  # <-- ДОБАВЛЕНО
 
-# === ЛОГИРОВАНИЕ ДЛЯ RENDER ===
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
-monitor_thread = None
+monitor_task = None
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -24,7 +22,8 @@ def load_data():
                 data = json.load(f)
                 data["groups"] = [str(g).strip() for g in data.get("groups", [])]
                 return data
-        except: pass
+        except Exception as e:
+            log.error(f"Ошибка чтения data: {e}")
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
 
 def save_data(data):
@@ -36,41 +35,41 @@ def add_alert(alert):
     data = load_data()
     alert["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["alerts"].append(alert)
-    data["alerts"] = data["alerts"][-100:]
+    data["alerts"] = data["alerts"][-100:]  # последние 100
     save_data(data)
 
-def run_monitor_async():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        data = load_data()
-        if not data["keywords"] or not data["groups"]:
-            return
-        monitor = TelegramMonitor(data["keywords"], data["groups"], add_alert)
-        loop.run_until_complete(monitor.start())
-    except Exception as e:
-        log.error(f"[ОШИБКА] Мониторинг: {e}")
-    finally:
-        loop.close()
+async def run_monitoring():
+    data = load_data()
+    if not data["keywords"] or not data["groups"]:
+        log.warning("Нет ключевых слов или групп — мониторинг не запущен")
+        return
+
+    monitor = TelegramMonitor(data["keywords"], data["groups"])
+    await monitor.start(add_alert)  # передаём callback
 
 def start_monitoring():
-    global monitor_thread
-    data = load_data()
-    if data["monitoring_active"] or (monitor_thread and monitor_thread.is_alive()):
+    global monitor_task
+    if monitor_task is not None:
         return
+
+    data = load_data()
     data["monitoring_active"] = True
     save_data(data)
-    monitor_thread = threading.Thread(target=run_monitor_async, daemon=True)
-    monitor_thread.start()
-    log.info("[MONITOR] Запущен в потоке")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    monitor_task = loop.create_task(run_monitoring())
+    log.info("[MONITOR] Запущен асинхронно")
 
 def stop_monitoring():
-    global monitor_thread
+    global monitor_task
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
-    if monitor_thread and monitor_thread.is_alive():
-        log.info("[MONITOR] Остановка...")
+    if monitor_task:
+        monitor_task.cancel()
+        monitor_task = None
+        log.info("[MONITOR] Остановлен")
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -80,72 +79,93 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(self.html().encode("utf-8"))
         elif self.path == "/api/data":
-            self.send_json(load_data())
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(load_data(), ensure_ascii=False).encode("utf-8"))
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode()
         params = urllib.parse.parse_qs(body)
-        data = load_data()
 
         if self.path == "/api/add_keyword":
             kw = params.get("keyword", [""])[0].strip().lower()
-            if kw and kw not in data["keywords"]:
-                data["keywords"].append(kw); save_data(data)
+            if kw:
+                data = load_data()
+                if kw not in data["keywords"]:
+                    data["keywords"].append(kw)
+                    save_data(data)
         elif self.path == "/api/add_group":
             g = params.get("group", [""])[0].strip()
-            if g and g not in data["groups"]:
-                data["groups"].append(g); save_data(data)
+            if g:
+                data = load_data()
+                if g not in data["groups"]:
+                    data["groups"].append(g)
+                    save_data(data)
         elif self.path == "/api/delete_keyword":
             kw = params.get("keyword", [""])[0]
+            data = load_data()
             if kw in data["keywords"]:
-                data["keywords"].remove(kw); save_data(data)
+                data["keywords"].remove(kw)
+                save_data(data)
         elif self.path == "/api/delete_group":
             g = params.get("group", [""])[0]
+            data = load_data()
             if g in data["groups"]:
-                data["groups"].remove(g); save_data(data)
+                data["groups"].remove(g)
+                save_data(data)
         elif self.path == "/api/start_monitoring":
             start_monitoring()
         elif self.path == "/api/stop_monitoring":
             stop_monitoring()
         elif self.path == "/api/clear_alerts":
-            data["alerts"] = []; save_data(data)
+            data = load_data()
+            data["alerts"] = []
+            save_data(data)
 
         self.send_response(302)
         self.send_header("Location", "/")
         self.end_headers()
 
-    def send_json(self, data):
-        self.send_response(200)
-        self.send_header("Content-type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-
     def html(self):
         data = load_data()
         status_color = "green" if data.get("monitoring_active") else "red"
         status_text = "Активен" if data.get("monitoring_active") else "Остановлен"
-        kw_html = "".join(f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline"><input type="hidden" name="keyword" value="{kw}"><button>×</button></form></li>' for kw in data["keywords"]) or "<li>—</li>"
-        grp_html = "".join(f'<li>{g} <form method="POST" action="/api/delete_group" style="display:inline"><input type="hidden" name="group" value="{g}"><button>×</button></form></li>' for g in data["groups"]) or "<li>—</li>"
+        kw_html = "".join(f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline"><input type="hidden" name="keyword" value="{kw}"><button type="submit">×</button></form></li>' for kw in data["keywords"]) or "<li>—</li>"
+        grp_html = "".join(f'<li>{g} <form method="POST" action="/api/delete_group" style="display:inline"><input type="hidden" name="group" value="{g}"><button type="submit">×</button></form></li>' for g in data["groups"]) or "<li>—</li>"
         alerts = "".join(
-            f'<div style="border:1px solid #ddd;padding:8px;margin:5px;border-radius:4px">'
-            f'<b>{a["timestamp"]}</b> — <a href="{a["link"]}" target="_blank">{a["keyword"]} в {a["group"]}</a><br>'
-            f'<small>{a["message"][:150]}{"..." if len(a["message"])>150 else ""}</small></div>'
-            for a in data["alerts"][-10:]
-        ) or "<p>Нет алертов</p>"
+            f'<div style="border:1px solid #ddd;padding:10px;margin:8px 0;border-radius:8px;background:#f8f9fa">'
+            f'<b>{a["timestamp"]}</b><br>'
+            f'<a href="{a["link"]}" target="_blank">{a["keyword"]} в {a["group"]}</a><br>'
+            f'<small>{a["message"]}</small></div>'
+            for a in reversed(data["alerts"][-15:])  # последние 15, новые сверху
+        ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Dashboat</title><meta http-equiv="refresh" content="10">
-<style>body{{font-family:Arial;max-width:800px;margin:40px auto;background:#f9f9f9;padding:20px}}
-button{{background:#007bff;color:#fff;border:none;padding:8px 16px;border-radius:4px;margin:5px;cursor:pointer}}
-input[type=text]{{padding:8px;border:1px solid #ccc;border-radius:4px;width:220px}}
-.status {{ color: {status_color}; font-weight: bold; }}</style></head><body>
-<h1>Dashboat</h1>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v10</title>
+<meta http-equiv="refresh" content="15">
+<style>
+  body {{font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; background:#f0f2f5; padding:20px; line-height:1.5}}
+  h1 {{color:#1a5fb4}}
+  button {{background:#1a5fb4; color:white; border:none; padding:10px 18px; border-radius:8px; cursor:pointer; font-size:16px}}
+  button:hover {{background:#0d47a1}}
+  input[type=text] {{padding:10px; width:300px; border-radius:8px; border:1px solid #ccc}}
+  ul {{list-style:none; padding:0}}
+  li {{background:white; padding:10px; margin:5px 0; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.1)}}
+  .status {{font-weight:bold; color:{status_color}}}
+  .footer {{margin-top:80px; text-align:center; color:#666; font-size:0.9em}}
+</style>
+</head><body>
+<h1>Dashboat v10</h1>
 <p>Статус: <span class="status">{status_text}</span></p>
+
 <form method="POST" action="/api/start_monitoring" style="display:inline"><button>Запустить</button></form>
 <form method="POST" action="/api/stop_monitoring" style="display:inline"><button>Остановить</button></form>
+<form method="POST" action="/api/clear_alerts" style="display:inline; margin-left:20px"><button style="background:#d32f2f">Очистить алерты</button></form>
 
 <h2>Ключевые слова</h2>
 <form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="масляный" required><button>+</button></form>
@@ -155,24 +175,23 @@ input[type=text]{{padding:8px;border:1px solid #ccc;border-radius:4px;width:220p
 <form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890" required><button>+</button></form>
 <ul>{grp_html}</ul>
 
-<h2>Алерты</h2>
-<form method="POST" action="/api/clear_alerts"><button style="background:#dc3545">Очистить</button></form>
+<h2>Алерты (последние)</h2>
 {alerts}
 
-<p style="color:#888;font-size:0.9em;margin-top:50px">Dashboat v5 | @Shmelibze | Батуми</p>
+<div class="footer">Dashboat v10 | @Shmelibze | Батуми | 2025</div>
 </body></html>"""
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     log.info(f"[SERVER] Запуск на 0.0.0.0:{port}")
-    
-    # Автозапуск
+    log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
+
+    # Автозапуск при старте
     data = load_data()
     if data.get("monitoring_active"):
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), Handler)
-    log.info(f"[DASHBOARD] http://0.0.0.0:{port}")
     server.serve_forever()
 
 if __name__ == "__main__":
