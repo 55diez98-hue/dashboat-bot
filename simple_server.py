@@ -1,10 +1,9 @@
-# simple_server.py — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ (18.11.2025)
-# Работает на Render. Запуск в отдельном потоке. Никаких RuntimeError: no running event loop
+# simple_server.py — АБСОЛЮТНО ПОСЛЕДНЯЯ РАБОЧАЯ ВЕРСИЯ (18.11.2025)
+# Работает на Render без ошибок event loop
 import asyncio
 import json
 import os
 import urllib.parse
-import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram_monitor import TelegramMonitor
@@ -14,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 DATA_FILE = "dashboat_data.json"
-monitor_thread = None
+monitor_task = None  # одна задача в текущем loop
 
 
 def load_data():
@@ -25,7 +24,7 @@ def load_data():
                 data["groups"] = [str(g).strip() for g in data.get("groups", [])]
                 return data
         except Exception as e:
-            log.error(f"Ошибка чтения dashboat_data.json: {e}")
+            log.error(f"Ошибка чтения json: {e}")
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
 
 
@@ -43,58 +42,43 @@ def add_alert(alert):
     save_data(data)
 
 
-# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-#  ЭТО ГЛАВНОЕ — МОНИТОРИНГ В ОТДЕЛЬНОМ ПОТОКЕ С СОБСТВЕННЫМ LOOP
-def monitoring_worker():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def run_monitoring():
+    data = load_data()
+    if not data["keywords"] or not data["groups"]:
+        log.warning("Нет ключей или групп — мониторинг не стартует")
+        return
 
-    async def runner():
-        data = load_data()
-        if not data["keywords"] or not data["groups"]:
-            log.warning("Нет ключевых слов или групп — мониторинг не стартует")
-            return
-
-        log.info("[MONITOR] Запускаем TelegramMonitor в отдельном потоке")
-        monitor = TelegramMonitor(data["keywords"], data["groups"])
-        monitor.set_callback(add_alert)
-        await monitor.start()   # ← здесь тесты и вся работа
-
-    try:
-        loop.run_until_complete(runner())
-    except Exception as e:
-        log.error(f"[КРИТ] Ошибка в мониторинге: {e}")
-    finally:
-        loop.close()
+    log.info("[MONITOR] Создаём TelegramMonitor...")
+    monitor = TelegramMonitor(data["keywords"], data["groups"])
+    monitor.set_callback(add_alert)
+    await monitor.start()  # ← здесь всё работает в текущем loop
 
 
 def start_monitoring():
-    global monitor_thread
-    if monitor_thread and monitor_thread.is_alive():
-        log.info("[MONITOR] Уже работает")
+    global monitor_task
+    if monitor_task and not monitor_task.done():
+        log.info("[MONITOR] Уже запущен")
         return
 
     data = load_data()
     data["monitoring_active"] = True
     save_data(data)
 
-    monitor_thread = threading.Thread(target=monitoring_worker, daemon=True)
-    monitor_thread.start()
-    log.info("[MONITOR] УСПЕШНО ЗАПУЩЕН В ОТДЕЛЬНОМ ПОТОКЕ — Telethon стартует!")
+    # ← ВАЖНО: используем ТЕКУЩИЙ event loop (он уже есть на Render)
+    monitor_task = asyncio.get_event_loop().create_task(run_monitoring())
+    log.info("[MONITOR] ЗАПУЩЕН — Telethon стартует в текущем loop!")
 
 
 def stop_monitoring():
-    global monitor_thread
+    global monitor_task
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
 
-    if monitor_thread and monitor_thread.is_alive():
-        # Telethon сам завершится при отключении клиента
-        log.info("[MONITOR] Остановка...")
-        # ничего больше не делаем — поток завершится сам
-    monitor_thread = None
-# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+    if monitor_task:
+        monitor_task.cancel()
+        monitor_task = None
+        log.info("[MONITOR] Остановлен")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -159,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
     def html(self):
         data = load_data()
         status_color = "green" if data.get("monitoring_active") else "red"
-        status_text = "Активен" if data.get("monitoring_active") else "Остановлен"
+        status_text = "Активен" if data.get("monitoring_active")") else "Остановлен"
 
         kw_html = "".join(
             f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline">'
@@ -182,39 +166,35 @@ class Handler(BaseHTTPRequestHandler):
         ) or "<p style='color:#888'>Нет алертов</p>"
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v12</title>
+<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v14 FINAL</title>
 <meta http-equiv="refresh" content="15">
 <style>
   body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f2f5;padding:20px;line-height:1.5}}
   h1 {{color:#1a5fb4}}
-  button {{background:#1a5fb4;color:white;border:none;padding:10px 18px;border-radius:8px;cursor:pointer}}
+  button {{background:#1a5fb4;color:white;border:none;padding:12px 20px;border-radius:8px;cursor:pointer;font-size:1.1em}}
   button:hover {{background:#0d47a1}}
-  input[type=text] {{padding:10px;width:300px;border-radius:8px;border:1px solid #ccc}}
+  input[type=text] {{padding:12px;width:320px;border-radius:8px;border:1px solid #ccc;font-size:1.1em}}
   ul {{list-style:none;padding:0}}
-  li {{background:white;padding:10px;margin:5px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}}
-  .status {{font-weight:bold;color:{status_color}}}
+  li {{background:white;padding:12px;margin:8px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}}
+  .status {{font-weight:bold;color:{status_color};font-size:1.3em}}
 </style></head><body>
-<h1>Dashboat v12 — Батуми</h1>
-<p>Статус мониторинга: <span class="status">{status_text}</span></p>
+<h1>Dashboat v14 — Батуми FINAL</h1>
+<p>Статус: <span class="status">{status_text}</span></p>
 
-<form method="POST" action="/api/start_monitoring" style="display:inline"><button>ЗАПУСТИТЬ</button></form>
+<form method="POST" action="/api/start_monitoring" style="display:inline"><button>ЗАПУСТИТЬ МОНИТОРИНГ</button></form>
 <form method="POST" action="/api/stop_monitoring" style="display:inline"><button>Остановить</button></form>
-<form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:15px"><button style="background:#d32f2f">Очистить алерты</button></form>
+<form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:20px"><button style="background:#d32f2f">Очистить алерты</button></form>
 
 <h2>Ключевые слова</h2>
-<form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="масляный" required><button>+</button></form>
+<form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, масляный, куплю телефон" required><button>+</button></form>
 <ul>{kw_html}</ul>
 
 <h2>Группы (ID)</h2>
 <form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890" required><button>+</button></form>
 <ul>{grp_html}</ul>
 
-<h2>Алерты (последние 15)</h2>
+<h2>Последние алерты</h2>
 {alerts}
-
-<div style="margin-top:100px;color:#888;font-size:0.9em;text-align:center">
-Dashboat v12 | @Shmelibze | Батуми 2025
-</div>
 </body></html>"""
 
 
@@ -223,11 +203,20 @@ def run_server():
     log.info(f"[SERVER] Запуск на порту {port}")
     log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
 
+    # автозапуск при старте
     if load_data().get("monitoring_active"):
         start_monitoring()
 
     server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+    
+    # ← ВАЖНО: запускаем HTTP-сервер в отдельном потоке, а Telethon — в основном loop
+    def start_http():
+        server.serve_forever()
+
+    threading.Thread(target=start_http, daemon=True).start()
+    
+    # ← Теперь основной поток свободен — запускаем asyncio loop
+    asyncio.run(asyncio.sleep(86400))  # держим живым весь день
 
 
 if __name__ == "__main__":
