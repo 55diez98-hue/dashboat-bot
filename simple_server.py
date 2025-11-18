@@ -1,5 +1,4 @@
-# simple_server.py — ФИНАЛЬНАЯ ВЕРСИЯ v18 (18.11.2025)
-# Полностью рабочая + поддержка HEAD для UptimeRobot (больше никогда не будет 501)
+# simple_server.py — DASHBORD v1.0 (18.11.2025) — Батуми Барахолка
 import asyncio
 import json
 import os
@@ -24,17 +23,14 @@ def load_data():
                 data = json.load(f)
                 data["groups"] = [str(g).strip() for g in data.get("groups", [])]
                 return data
-        except Exception as e:
-            log.error(f"Ошибка чтения json: {e}")
+        except:
+            os.remove(DATA_FILE)
     return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
 
 
 def save_data(data):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.error(f"Не удалось сохранить JSON: {e}")
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def add_alert(alert):
@@ -48,39 +44,24 @@ def add_alert(alert):
 def monitoring_worker():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    async def run():
-        data = load_data()
-        if not data.get("keywords") or not data.get("groups"):
-            log.warning("Нет ключевых слов или групп — мониторинг не стартует")
-            return
-
-        log.info("[MONITOR] Запускаем TelegramMonitor в отдельном потоке")
-        monitor = TelegramMonitor(data["keywords"], data["groups"])
-        monitor.set_callback(add_alert)
-        await monitor.start()
-
-    try:
-        loop.run_until_complete(run())
-    except Exception as e:
-        log.error(f"[КРИТ] Ошибка в мониторинге: {e}")
-    finally:
-        loop.close()
+    data = load_data()
+    if not data.get("keywords") or not data.get("groups"):
+        return
+    monitor = TelegramMonitor(data["keywords"], data["groups"])
+    monitor.set_callback(add_alert)
+    loop.run_until_complete(monitor.start())
 
 
 def start_monitoring():
     global monitor_thread
     if monitor_thread and monitor_thread.is_alive():
-        log.info("[MONITOR] Уже работает")
         return
-
     data = load_data()
     data["monitoring_active"] = True
     save_data(data)
-
     monitor_thread = threading.Thread(target=monitoring_worker, daemon=True)
     monitor_thread.start()
-    log.info("[MONITOR] УСПЕШНО ЗАПУЩЕН — Telethon работает в отдельном потоке!")
+    log.info("DASHBORD ЗАПУЩЕН — мониторинг активен 24/7")
 
 
 def stop_monitoring():
@@ -88,12 +69,10 @@ def stop_monitoring():
     data = load_data()
     data["monitoring_active"] = False
     save_data(data)
-    log.info("[MONITOR] Остановлен")
     monitor_thread = None
 
 
 class Handler(BaseHTTPRequestHandler):
-    # === HEAD для UptimeRobot (теперь 200 OK вместо 501) ===
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -161,72 +140,103 @@ class Handler(BaseHTTPRequestHandler):
 
     def html(self):
         data = load_data()
-        status_color = "green" if data.get("monitoring_active") else "red"
+        status_color = "green" if data.get("monitoring_active") else "#d32f2f"
         status_text = "АКТИВЕН" if data.get("monitoring_active") else "ОСТАНОВЛЕН"
 
+        # Ключевые слова с кнопкой удаления
         kw_html = "".join(
-            f'<li>{kw} <form method="POST" action="/api/delete_keyword" style="display:inline">'
-            f'<input type="hidden" name="keyword" value="{kw}"><button type="submit">×</button></form></li>'
+            f'<div style="background:#fff;padding:12px;margin:6px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center">'
+            f'{kw.upper()} '
+            f'<form method="POST" action="/api/delete_keyword" style="margin:0">'
+            f'<input type="hidden" name="keyword" value="{kw}">'
+            f'<button type="submit" style="background:#d32f2f;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:0.9em">✕</button></form></div>'
             for kw in data["keywords"]
-        ) or "<li>—</li>"
+        ) or "<div style='color:#888;padding:20px'>— нет ключевых слов —</div>"
 
+        # Группы с кнопкой удаления
         grp_html = "".join(
-            f'<li>{g} <form method="POST" action="/api/delete_group" style="display:inline">'
-            f'<input type="hidden" name="group" value="{g}"><button type="submit">×</button></form></li>'
+            f'<div style="background:#fff;padding:12px;margin:6px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center">'
+            f'{g} '
+            f'<form method="POST" action="/api/delete_group" style="margin:0">'
+            f'<input type="hidden" name="group" value="{g}">'
+            f'<button type="submit" style="background:#d32f2f;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:0.9em">✕</button></form></div>'
             for g in data["groups"]
-        ) or "<li>—</li>"
+        ) or "<div style='color:#888;padding:20px'>— нет групп —</div>"
 
+        # Алерты
         alerts = "".join(
-            f'<div style="border:1px solid #ddd;padding:15px;margin:10px 0;border-radius:10px;background:#fff">'
-            f'<b>{a["timestamp"]}</b><br>'
-            f'<a href="{a["link"]}" target="_blank">{a["keyword"].upper()} → {a["group"]}</a><br>'
-            f'<small>{a["message"][:200]}...</small></div>'
-            for a in reversed(data.get("alerts", [])[-15:])
-        ) or "<p style='color:#888'>Алертов пока нет</p>"
+            f'<div style="background:#fff;padding:16px;margin:12px 0;border-radius:12px;border-left:5px solid #1a5fb4">'
+            f'<b style="color:#1a5fb4">{a["timestamp"]}</b><br>'
+            f'<a href="{a["link"]}" target="_blank" style="color:#1a5fb4;font-weight:bold">{a["keyword"].upper()} → {a["group"]}</a><br>'
+            f'<small style="color:#555">{a["message"][:250]}{"..." if len(a["message"])>250 else ""}</small>'
+            f'</div>'
+            for a in reversed(data.get("alerts", [])[-20:])
+        ) or '<div style="text-align:center;color:#888;padding:40px">Алертов пока нет</div>'
 
         return f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Dashboat v18 FINAL</title>
-<meta http-equiv="refresh" content="15">
-<style>
-  body {{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;background:#f0f9;padding:20px;line-height:1.5}}
-  h1 {{color:#1a5fb4}}
-  button {{background:#1a5fb4;color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:1.1em}}
-  button:hover {{background:#0d47a1}}
-  input[type=text] {{padding:12px;width:340px;border-radius:8px;border:1px solid #ccc;font-size:1.1em}}
-  ul {{list-style:none;padding:0}}
-  li {{background:white;padding:12px;margin:8px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center}}
-  .status {{font-weight:bold;color:{status_color};font-size:1.4em}}
-</style></head><body>
-<h1>Dashboat v18 — Батуми Барахолка</h1>
-<p>Статус: <span class="status">{status_text}</span></p>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Dashbord — Батуми Барахолка</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="20">
+    <style>
+        body {{font-family:system-ui;background:#f5f7fa;padding:20px;color:#333;line-height:1.6}}
+        h1 {{color:#1a5fb4;text-align:center;margin-bottom:10px}}
+        .status {{font-size:2em;font-weight:bold;color:{status_color};text-align:center;display:block;margin:10px 0}}
+        .btn {{padding:14px 28px;border:none;border-radius:10px;color:#fff;font-size:1.1em;cursor:pointer;margin:8px}}
+        .btn-start {{background:#1a5fb4}}
+        .btn-stop {{background:#d32f2f}}
+        .btn-clear {{background:#8B0000}}
+        input[type=text] {{padding:14px;width:100%;max-width:400px;border-radius:10px;border:1px solid #ccc;font-size:1.1em;margin:10px 0}}
+        .section {{background:#fff;padding:20px;border-radius:16px;margin:20px 0;box-shadow:0 4px 12px rgba(0,0,0,0.05)}}
+        footer {{text-align:center;color:#888;margin-top:60px;font-size:0.9em}}
+    </style>
+</head>
+<body>
+    <h1>Dashbord</h1>
+    <div class="status">{status_text}</div>
 
-<form method="POST" action="/api/start_monitoring" style="display:inline"><button>ЗАПУСТИТЬ</button></form>
-<form method="POST" action="/api/stop_monitoring" style="display:inline"><button style="background:#d32f2f">ОСТАНОВИТЬ</button></form>
-<form method="POST" action="/api/clear_alerts" style="display:inline;margin-left:20px"><button style="background:#8B0000">ОЧИСТИТЬ АЛЕРТЫ</button></form>
+    <div style="text-align:center">
+        <form method="POST" action="/api/start_monitoring" style="display:inline"><button class="btn btn-start">ЗАПУСТИТЬ</button></form>
+        <form method="POST" action="/api/stop_monitoring" style="display:inline"><button class="btn btn-stop">ОСТАНОВИТЬ</button></form>
+        <form method="POST" action="/api/clear_alerts" style="display:inline"><button class="btn btn-clear">ОЧИСТИТЬ АЛЕРТЫ</button></form>
+    </div>
 
-<h2>Ключевые слова</h2>
-<form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, айфон, смартфон" required><button>+</button></form>
-<pre>{kw_html}</pre>
+    <div class="section">
+        <h2>Ключевые слова</h2>
+        <form method="POST" action="/api/add_keyword">
+            <input name="keyword" placeholder="например: mi band, айфон, macbook" required>
+            <button class="btn btn-start">+</button>
+        </form>
+        {kw_html}
+    </div>
 
-<h2>Группы</h2>
-<form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890" required><button>+</button></form>
-<pre>{grp_html}</pre>
+    <div class="section">
+        <h2>Группы</h2>
+        <form method="POST" action="/api/add_group">
+            <input name="group" placeholder="-1001234567890" required>
+            <button class="btn btn-start">+</button>
+        </form>
+        {grp_html}
+    </div>
 
-<h2>Последние алерты</h2>
-{alerts}
+    <div class="section">
+        <h2>Последние алерты</h2>
+        {alerts}
+    </div>
 
-<div style="margin-top:100px;text-align:center;color:#888;font-size:0.9em">
-Dashboat v18 | @Shmelibze | Батуми | 2025
-</div>
-</body></html>"""
+    <footer>
+        Dashbord v1.0 — Батуми Барахолка 2025<br>
+        @Shmelibze — король барахолки
+    </footer>
+</body>
+</html>"""
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    log.info(f"[SERVER] Запуск на порту {port}")
-    log.info(f"[DASHBOARD] https://dashboat-bot.onrender.com")
-
+    log.info(f"DASHBORD запущен → https://dashboat-bot.onrender.com")
     if load_data().get("monitoring_active"):
         start_monitoring()
-
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
