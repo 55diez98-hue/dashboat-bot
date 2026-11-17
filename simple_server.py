@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 import urllib.parse
 from datetime import datetime, timezone
@@ -102,6 +103,26 @@ def stop_monitoring():
     status('stopped')
 
 
+def parse_group_list(raw):
+    """Split multiline/space/comma-separated group IDs and @usernames, preserving order."""
+    result = []
+    seen = set()
+    invalid = []
+    for item in re.split(r'[\s,;]+', raw.strip()):
+        if not item:
+            continue
+        # Telegram supergroup / channel marked IDs, or public group usernames.
+        if not (re.fullmatch(r'-100[0-9]{5,}', item) or
+                re.fullmatch(r'@[A-Za-z][A-Za-z0-9_]{4,31}', item)):
+            invalid.append(item)
+            continue
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+    return result, invalid
+
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -193,6 +214,21 @@ class Handler(BaseHTTPRequestHandler):
                 group = value('group')[:150]
                 if group:
                     update(lambda d: d['groups'].append(group) if group not in d['groups'] else None)
+            elif path == '/api/add_groups_bulk':
+                groups, invalid = parse_group_list(value('groups_bulk'))
+                if invalid:
+                    self._respond(400, 'Некорректные ID или @username: ' + esc(', '.join(invalid)))
+                    return
+                if not groups:
+                    self._respond(400, 'Список пуст: вставьте ID групп или @username')
+                    return
+                def add_all(data):
+                    existing = {g.lower() for g in data['groups']}
+                    for group in groups:
+                        if group.lower() not in existing:
+                            data['groups'].append(group)
+                            existing.add(group.lower())
+                update(add_all)
             elif path == '/api/delete_group':
                 group = value('group')
                 update(lambda d: d['groups'].remove(group) if group in d['groups'] else None)
@@ -250,7 +286,7 @@ h1{{text-align:center;color:#1a5fb4}} .status{{font-size:1.8em;color:{color};fon
 .section{{background:white;padding:20px;border-radius:14px;margin:20px 0;box-shadow:0 3px 12px #00000010}}
 .btn{{background:#1a5fb4;color:white;border:0;border-radius:9px;padding:11px 17px;cursor:pointer;margin:5px}}
 .danger{{background:#be3636}} .inline{{display:inline-block;margin:0}}.item{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #eee;padding:7px;gap:12px;overflow-wrap:anywhere}}
-input{{max-width:100%;padding:11px;border:1px solid #cbd2dc;border-radius:8px}}.alert{{border-left:4px solid #1a5fb4;padding:12px;margin:12px 0;background:#f6f9ff;overflow-wrap:anywhere}}
+input,textarea{{max-width:100%;box-sizing:border-box;padding:11px;border:1px solid #cbd2dc;border-radius:8px}}textarea{{width:100%;font:inherit;resize:vertical}}.alert{{border-left:4px solid #1a5fb4;padding:12px;margin:12px 0;background:#f6f9ff;overflow-wrap:anywhere}}
 .stats{{display:flex;gap:16px;flex-wrap:wrap}}.stats span{{background:#eff4fb;padding:12px;border-radius:10px}}small,.muted{{color:#687486}}
 </style></head><body><h1>Dashboat v3</h1><div class="status">{esc(labels.get(state, state))}</div>
 <p style="text-align:center">{detail}</p><div style="text-align:center">
@@ -259,7 +295,12 @@ input{{max-width:100%;padding:11px;border:1px solid #cbd2dc;border-radius:8px}}.
 <div class="section"><div class="stats"><span>Групп: <b>{len(data['groups'])}</b></span><span>Сообщений: <b>{stats['messages']}</b></span><span>Совпадений: <b>{stats['matches']}</b></span><span>Отправлено: <b>{stats['sent']}</b></span></div>
 <p class="muted">Последнее сообщение: {esc(info['last_message'] or '—')} (UTC). После изменения настроек нажмите «ПЕРЕЗАПУСТИТЬ».</p></div>
 <div class="section"><h2>Ключевые слова</h2><form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, айфон, macbook" required><button class="btn">+</button></form>{keywords}</div>
-<div class="section"><h2>Группы</h2><form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890 или @username" required><button class="btn">+</button></form>{groups}</div>
+<div class="section"><h2>Группы</h2><form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890 или @username" required><button class="btn">+</button></form>
+<h3>Добавить список групп сразу</h3>
+<form method="POST" action="/api/add_groups_bulk">
+<textarea name="groups_bulk" rows="5" maxlength="3500" placeholder="Вставьте ID групп через пробел, запятую или с новой строки" required></textarea>
+<button class="btn" type="submit">ДОБАВИТЬ ВСЕ ГРУППЫ</button></form>
+<p class="muted">Повторяющиеся ID пропускаются. Уже сохранённые группы останутся. Чтобы применить новый список к Telegram, нажмите «ПЕРЕЗАПУСТИТЬ».</p>{groups}</div>
 <div class="section"><h2>Последние алерты</h2>{action('/api/clear_alerts', 'ОЧИСТИТЬ АЛЕРТЫ', 'danger')}{alerts}</div>
 <p class="muted">Dashboat v3 · Панель обновляется раз в 20 секунд</p></body></html>'''
 
