@@ -9,7 +9,13 @@ services:
         sync: false
       - key: API_HASH
         sync: false
+      - key: SESSION_STRING
+        sync: false
       - key: BOT_TOKEN
         sync: false
       - key: ALERT_CHAT_ID
         sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Optional: durable storage for settings and duplicate history.
+      # Supply DATABASE_URL in Render environment if using PostgreSQL.

@@ -1,242 +1,273 @@
-# simple_server.py — DASHBORD v1.0 (18.11.2025) — Батуми Барахолка
+"""Dashboat v3 — lightweight web UI and actual Telegram lifecycle control."""
 import asyncio
+import base64
+import hmac
+import html
 import json
-import os
-import urllib.parse
-import threading
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram_monitor import TelegramMonitor
 import logging
+import os
+import threading
+import urllib.parse
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-logging.basicConfig(level=logging.INFO)
+from storage import initialize, read, update
+from telegram_monitor import TelegramMonitor
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
 
-DATA_FILE = "dashboat_data.json"
-monitor_thread = None
+_lock = threading.RLock()
+_thread = None
+_loop = None
+_monitor = None
+_state = 'stopped'
+_message = ''
+_cancel_requested = threading.Event()
 
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                data["groups"] = [str(g).strip() for g in data.get("groups", [])]
-                return data
-        except:
-            os.remove(DATA_FILE)
-    return {"keywords": [], "groups": [], "alerts": [], "monitoring_active": False}
+def status(state, detail=''):
+    global _state, _message
+    with _lock:
+        _state, _message = state, detail
+    log.info('Monitor: %s %s', state, detail)
 
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def snapshot():
+    with _lock:
+        counts = dict(_monitor.counts) if _monitor else {'messages': 0, 'matches': 0, 'sent': 0}
+        last = _monitor.last_message if _monitor else None
+        return {'monitor': _state, 'detail': _message, 'counts': counts,
+                'last_message': last, 'connected': bool(_monitor and _monitor.client and _monitor.client.is_connected())}
 
 
-def add_alert(alert):
-    data = load_data()
-    alert["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data["alerts"].append(alert)
-    data["alerts"] = data["alerts"][-100:]
-    save_data(data)
-
-
-def monitoring_worker():
+def worker():
+    global _loop, _monitor, _thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    data = load_data()
-    if not data.get("keywords") or not data.get("groups"):
-        return
-    monitor = TelegramMonitor(data["keywords"], data["groups"])
-    monitor.set_callback(add_alert)
-    loop.run_until_complete(monitor.start())
+    try:
+        data = read()
+        mon = TelegramMonitor(data['keywords'], data['groups'], status_callback=status)
+        with _lock:
+            _loop = loop
+            _monitor = mon
+        if _cancel_requested.is_set():
+            status('stopped')
+            return
+        loop.run_until_complete(mon.start())
+    except Exception as exc:
+        log.exception('Telegram monitor failed')
+        status('error', str(exc))
+    finally:
+        with _lock:
+            _loop = None
+            _monitor = None
+        loop.close()
 
 
 def start_monitoring():
-    global monitor_thread
-    if monitor_thread and monitor_thread.is_alive():
-        return
-    data = load_data()
-    data["monitoring_active"] = True
-    save_data(data)
-    monitor_thread = threading.Thread(target=monitoring_worker, daemon=True)
-    monitor_thread.start()
-    log.info("DASHBORD ЗАПУЩЕН — мониторинг активен 24/7")
+    global _thread
+    with _lock:
+        if _thread and _thread.is_alive():
+            return
+        data = read()
+        if not data['keywords'] or not data['groups']:
+            status('error', 'Сначала добавьте ключевые слова и группы')
+            return
+        _cancel_requested.clear()
+        status('starting')
+        update(lambda d: d.update(monitoring_active=True))
+        _thread = threading.Thread(target=worker, daemon=True, name='dashboat-monitor')
+        _thread.start()
 
 
 def stop_monitoring():
-    global monitor_thread
-    data = load_data()
-    data["monitoring_active"] = False
-    save_data(data)
-    monitor_thread = None
+    _cancel_requested.set()
+    update(lambda d: d.update(monitoring_active=False))
+    with _lock:
+        loop, mon, thread = _loop, _monitor, _thread
+    if loop and mon and thread and thread.is_alive():
+        status('stopping')
+        try:
+            future = asyncio.run_coroutine_threadsafe(mon.stop(), loop)
+            future.result(timeout=15)
+            thread.join(timeout=15)
+        except Exception:
+            log.exception('Monitor shutdown failed')
+            status('error', 'Не удалось остановить монитор; проверьте логи')
+            return
+        if thread.is_alive():
+            status('error', 'Монитор не завершился за отведённое время')
+            return
+    status('stopped')
+
+
+def esc(value):
+    return html.escape(str(value), quote=True)
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
+    def _respond(self, status_code, body, content_type='text/html; charset=utf-8', extra=None):
+        raw = body.encode('utf-8') if isinstance(body, str) else body
+        self.send_response(status_code)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(raw)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(raw)
+
+    def _authorized(self):
+        password = os.environ.get('ADMIN_PASSWORD', '')
+        if not password:
+            self._respond(503, 'ADMIN_PASSWORD не задан в Render. Настройте переменную окружения.')
+            return False
+        header = self.headers.get('Authorization', '')
+        try:
+            decoded = base64.b64decode(header.split(' ', 1)[1], validate=True).decode('utf-8') if header.startswith('Basic ') else ''
+        except (ValueError, UnicodeDecodeError, IndexError):
+            decoded = ''
+        expected = f'admin:{password}'
+        if not hmac.compare_digest(decoded.encode(), expected.encode()):
+            self._respond(401, 'Для управления Dashboat требуется вход.',
+                          extra={'WWW-Authenticate': 'Basic realm="Dashboat Admin", charset="UTF-8"'})
+            return False
+        return True
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_GET(self):
-        if self.path in ["/", "/index.html"]:
-            self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(self.html().encode("utf-8"))
+        path = urllib.parse.urlsplit(self.path).path
+        if path in ('/', '/index.html', '/ping'):
+            # Public HTTP 200 retained for existing UptimeRobot checks.
+            self._respond(200, '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Dashboat</title>'
+                         '<body><h2>Dashboat online</h2><p><a href="/dashboard">Панель управления</a></p></body></html>')
+        elif path == '/health':
+            info = snapshot()
+            ok = info['monitor'] == 'running' and info['connected']
+            self._respond(200 if ok else 503, json.dumps(info, ensure_ascii=False), 'application/json; charset=utf-8')
+        elif path == '/dashboard':
+            if self._authorized():
+                self._respond(200, self.html())
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._respond(404, 'Не найдено')
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode()
-        params = urllib.parse.parse_qs(body)
-
-        if self.path == "/api/add_keyword":
-            kw = params.get("keyword", [""])[0].strip().lower()
-            if kw:
-                data = load_data()
-                if kw not in data["keywords"]:
-                    data["keywords"].append(kw)
-                    save_data(data)
-
-        elif self.path == "/api/add_group":
-            g = params.get("group", [""])[0].strip()
-            if g:
-                data = load_data()
-                if g not in data["groups"]:
-                    data["groups"].append(g)
-                    save_data(data)
-
-        elif self.path == "/api/delete_keyword":
-            kw = params.get("keyword", [""])[0]
-            data = load_data()
-            if kw in data["keywords"]:
-                data["keywords"].remove(kw)
-                save_data(data)
-
-        elif self.path == "/api/delete_group":
-            g = params.get("group", [""])[0]
-            data = load_data()
-            if g in data["groups"]:
-                data["groups"].remove(g)
-                save_data(data)
-
-        elif self.path == "/api/start_monitoring":
-            start_monitoring()
-
-        elif self.path == "/api/stop_monitoring":
-            stop_monitoring()
-
-        elif self.path == "/api/clear_alerts":
-            data = load_data()
-            data["alerts"] = []
-            save_data(data)
-
-        self.send_response(302)
-        self.send_header("Location", "/")
-        self.end_headers()
+        if not self._authorized():
+            return
+        path = urllib.parse.urlsplit(self.path).path
+        if not path.startswith('/api/'):
+            self._respond(404, 'Не найдено')
+            return
+        # Reject cross-origin browser form submissions with saved Basic credentials.
+        origin = self.headers.get('Origin')
+        if origin:
+            host = self.headers.get('Host', '')
+            parsed = urllib.parse.urlsplit(origin)
+            if parsed.netloc != host or parsed.scheme not in ('http', 'https'):
+                self._respond(403, 'Недопустимый источник')
+                return
+        if self.headers.get('Content-Type', '').split(';')[0] != 'application/x-www-form-urlencoded':
+            self._respond(415, 'Неверный формат запроса')
+            return
+        length = int(self.headers.get('Content-Length', '0'))
+        if length > 4096:
+            self._respond(413, 'Слишком большой запрос')
+            return
+        params = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
+        value = lambda key: params.get(key, [''])[0].strip()
+        try:
+            if path == '/api/add_keyword':
+                kw = value('keyword').lower()[:100]
+                if kw:
+                    update(lambda d: d['keywords'].append(kw) if kw not in d['keywords'] else None)
+            elif path == '/api/delete_keyword':
+                kw = value('keyword')
+                update(lambda d: d['keywords'].remove(kw) if kw in d['keywords'] else None)
+            elif path == '/api/add_group':
+                group = value('group')[:150]
+                if group:
+                    update(lambda d: d['groups'].append(group) if group not in d['groups'] else None)
+            elif path == '/api/delete_group':
+                group = value('group')
+                update(lambda d: d['groups'].remove(group) if group in d['groups'] else None)
+            elif path == '/api/start_monitoring':
+                start_monitoring()
+            elif path == '/api/stop_monitoring':
+                stop_monitoring()
+            elif path == '/api/restart_monitoring':
+                stop_monitoring()
+                if snapshot()['monitor'] == 'stopped':
+                    start_monitoring()
+            elif path == '/api/clear_alerts':
+                update(lambda d: d.update(alerts=[]))
+            else:
+                self._respond(404, 'Неизвестная команда')
+                return
+        except Exception:
+            log.exception('Admin action failed')
+            self._respond(500, 'Ошибка. Проверьте логи Render.')
+            return
+        self._respond(303, '', extra={'Location': '/dashboard'})
 
     def html(self):
-        data = load_data()
-        status_color = "green" if data.get("monitoring_active") else "#d32f2f"
-        status_text = "АКТИВЕН" if data.get("monitoring_active") else "ОСТАНОВЛЕН"
-
-        # Ключевые слова с кнопкой удаления
-        kw_html = "".join(
-            f'<div style="background:#fff;padding:12px;margin:6px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center">'
-            f'{kw.upper()} '
-            f'<form method="POST" action="/api/delete_keyword" style="margin:0">'
-            f'<input type="hidden" name="keyword" value="{kw}">'
-            f'<button type="submit" style="background:#d32f2f;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:0.9em">✕</button></form></div>'
-            for kw in data["keywords"]
-        ) or "<div style='color:#888;padding:20px'>— нет ключевых слов —</div>"
-
-        # Группы с кнопкой удаления
-        grp_html = "".join(
-            f'<div style="background:#fff;padding:12px;margin:6px 0;border-radius:8px;display:flex;justify-content:space-between;align-items:center">'
-            f'{g} '
-            f'<form method="POST" action="/api/delete_group" style="margin:0">'
-            f'<input type="hidden" name="group" value="{g}">'
-            f'<button type="submit" style="background:#d32f2f;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:0.9em">✕</button></form></div>'
-            for g in data["groups"]
-        ) or "<div style='color:#888;padding:20px'>— нет групп —</div>"
-
-        # Алерты
-        alerts = "".join(
-            f'<div style="background:#fff;padding:16px;margin:12px 0;border-radius:12px;border-left:5px solid #1a5fb4">'
-            f'<b style="color:#1a5fb4">{a["timestamp"]}</b><br>'
-            f'<a href="{a["link"]}" target="_blank" style="color:#1a5fb4;font-weight:bold">{a["keyword"].upper()} → {a["group"]}</a><br>'
-            f'<small style="color:#555">{a["message"][:250]}{"..." if len(a["message"])>250 else ""}</small>'
-            f'</div>'
-            for a in reversed(data.get("alerts", [])[-20:])
-        ) or '<div style="text-align:center;color:#888;padding:40px">Алертов пока нет</div>'
-
-        return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="utf-8">
-    <title>Dashbord — Батуми Барахолка</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="20">
-    <style>
-        body {{font-family:system-ui;background:#f5f7fa;padding:20px;color:#333;line-height:1.6}}
-        h1 {{color:#1a5fb4;text-align:center;margin-bottom:10px}}
-        .status {{font-size:2em;font-weight:bold;color:{status_color};text-align:center;display:block;margin:10px 0}}
-        .btn {{padding:14px 28px;border:none;border-radius:10px;color:#fff;font-size:1.1em;cursor:pointer;margin:8px}}
-        .btn-start {{background:#1a5fb4}}
-        .btn-stop {{background:#d32f2f}}
-        .btn-clear {{background:#8B0000}}
-        input[type=text] {{padding:14px;width:100%;max-width:400px;border-radius:10px;border:1px solid #ccc;font-size:1.1em;margin:10px 0}}
-        .section {{background:#fff;padding:20px;border-radius:16px;margin:20px 0;box-shadow:0 4px 12px rgba(0,0,0,0.05)}}
-        footer {{text-align:center;color:#888;margin-top:60px;font-size:0.9em}}
-    </style>
-</head>
-<body>
-    <h1>Dashbord</h1>
-    <div class="status">{status_text}</div>
-
-    <div style="text-align:center">
-        <form method="POST" action="/api/start_monitoring" style="display:inline"><button class="btn btn-start">ЗАПУСТИТЬ</button></form>
-        <form method="POST" action="/api/stop_monitoring" style="display:inline"><button class="btn btn-stop">ОСТАНОВИТЬ</button></form>
-        <form method="POST" action="/api/clear_alerts" style="display:inline"><button class="btn btn-clear">ОЧИСТИТЬ АЛЕРТЫ</button></form>
-    </div>
-
-    <div class="section">
-        <h2>Ключевые слова</h2>
-        <form method="POST" action="/api/add_keyword">
-            <input name="keyword" placeholder="например: mi band, айфон, macbook" required>
-            <button class="btn btn-start">+</button>
-        </form>
-        {kw_html}
-    </div>
-
-    <div class="section">
-        <h2>Группы</h2>
-        <form method="POST" action="/api/add_group">
-            <input name="group" placeholder="-1001234567890" required>
-            <button class="btn btn-start">+</button>
-        </form>
-        {grp_html}
-    </div>
-
-    <div class="section">
-        <h2>Последние алерты</h2>
-        {alerts}
-    </div>
-
-    <footer>
-        Dashbord v1.0 — Батуми Барахолка 2025<br>
-        @Shmelibze — король барахолки
-    </footer>
-</body>
-</html>"""
+        data = read()
+        info = snapshot()
+        state = info['monitor']
+        labels = {'starting': 'ПОДКЛЮЧЕНИЕ', 'running': 'АКТИВЕН', 'stopping': 'ОСТАНОВКА',
+                  'stopped': 'ОСТАНОВЛЕН', 'error': 'ОШИБКА'}
+        color = '#138a46' if state == 'running' and info['connected'] else '#c0392b'
+        def action(path, text, css='', hidden_name='', hidden_value=''):
+            hidden = (f'<input type="hidden" name="{hidden_name}" value="{esc(hidden_value)}">'
+                      if hidden_name else '')
+            return (f'<form method="POST" action="{path}" class="inline">{hidden}'
+                    f'<button class="btn {css}">{esc(text)}</button></form>')
+        keywords = ''.join('<div class="item"><span>' + esc(k.upper()) + '</span>' +
+                           action('/api/delete_keyword', '✕', 'danger', 'keyword', k) + '</div>'
+                           for k in data['keywords']) or '<p>— нет ключевых слов —</p>'
+        groups = ''.join('<div class="item"><span>' + esc(data['group_titles'].get(g, g)) +
+                         (f' <small>({esc(g)})</small>' if data['group_titles'].get(g, g) != g else '') + '</span>' +
+                         action('/api/delete_group', '✕', 'danger', 'group', g) + '</div>'
+                         for g in data['groups']) or '<p>— нет групп —</p>'
+        alerts = ''.join('<div class="alert"><b>' + esc(a.get('timestamp', '')) + '</b><p>' +
+                         (f'<a target="_blank" rel="noopener noreferrer" href="{esc(a.get("link", ""))}">' if a.get('link') else '<span>') +
+                         esc(str(a.get('keyword', '')).upper()) + ' → ' + esc(a.get('group', '')) +
+                         ('</a>' if a.get('link') else '</span>') + '</p>' +
+                         '<small>' + esc(str(a.get('message', ''))[:300]) + '</small></div>'
+                         for a in reversed(data['alerts'][-20:])) or '<p>Алертов пока нет</p>'
+        stats = info['counts']
+        detail = esc(info['detail'])
+        return f'''<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Dashboat v3 — Батуми</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="20"><style>
+body{{font-family:system-ui,Arial,sans-serif;background:#f5f7fa;color:#273143;margin:auto;padding:20px;max-width:900px}}
+h1{{text-align:center;color:#1a5fb4}} .status{{font-size:1.8em;color:{color};font-weight:700;text-align:center}}
+.section{{background:white;padding:20px;border-radius:14px;margin:20px 0;box-shadow:0 3px 12px #00000010}}
+.btn{{background:#1a5fb4;color:white;border:0;border-radius:9px;padding:11px 17px;cursor:pointer;margin:5px}}
+.danger{{background:#be3636}} .inline{{display:inline-block;margin:0}}.item{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #eee;padding:7px;gap:12px;overflow-wrap:anywhere}}
+input{{max-width:100%;padding:11px;border:1px solid #cbd2dc;border-radius:8px}}.alert{{border-left:4px solid #1a5fb4;padding:12px;margin:12px 0;background:#f6f9ff;overflow-wrap:anywhere}}
+.stats{{display:flex;gap:16px;flex-wrap:wrap}}.stats span{{background:#eff4fb;padding:12px;border-radius:10px}}small,.muted{{color:#687486}}
+</style></head><body><h1>Dashboat v3</h1><div class="status">{esc(labels.get(state, state))}</div>
+<p style="text-align:center">{detail}</p><div style="text-align:center">
+{action('/api/start_monitoring', 'ЗАПУСТИТЬ')}{action('/api/stop_monitoring', 'ОСТАНОВИТЬ', 'danger')}
+{action('/api/restart_monitoring', 'ПЕРЕЗАПУСТИТЬ')}</div>
+<div class="section"><div class="stats"><span>Групп: <b>{len(data['groups'])}</b></span><span>Сообщений: <b>{stats['messages']}</b></span><span>Совпадений: <b>{stats['matches']}</b></span><span>Отправлено: <b>{stats['sent']}</b></span></div>
+<p class="muted">Последнее сообщение: {esc(info['last_message'] or '—')} (UTC). После изменения настроек нажмите «ПЕРЕЗАПУСТИТЬ».</p></div>
+<div class="section"><h2>Ключевые слова</h2><form method="POST" action="/api/add_keyword"><input name="keyword" placeholder="mi band, айфон, macbook" required><button class="btn">+</button></form>{keywords}</div>
+<div class="section"><h2>Группы</h2><form method="POST" action="/api/add_group"><input name="group" placeholder="-1001234567890 или @username" required><button class="btn">+</button></form>{groups}</div>
+<div class="section"><h2>Последние алерты</h2>{action('/api/clear_alerts', 'ОЧИСТИТЬ АЛЕРТЫ', 'danger')}{alerts}</div>
+<p class="muted">Dashboat v3 · Панель обновляется раз в 20 секунд</p></body></html>'''
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    log.info(f"DASHBORD запущен → https://dashboat-bot.onrender.com")
-    if load_data().get("monitoring_active"):
+if __name__ == '__main__':
+    initialize()
+    if read().get('monitoring_active'):
         start_monitoring()
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    port = int(os.getenv('PORT', '10000'))
+    log.info('Dashboat v3 listening on port %s', port)
+    ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
