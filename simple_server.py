@@ -19,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 _lock = threading.RLock()
+_control_lock = threading.RLock()  # serialize start/stop/restart requests
 _thread = None
 _loop = None
 _monitor = None
@@ -68,7 +69,7 @@ def worker():
 
 def start_monitoring():
     global _thread
-    with _lock:
+    with _control_lock, _lock:
         if _thread and _thread.is_alive():
             return
         data = read()
@@ -83,24 +84,35 @@ def start_monitoring():
 
 
 def stop_monitoring():
-    _cancel_requested.set()
-    update(lambda d: d.update(monitoring_active=False))
-    with _lock:
-        loop, mon, thread = _loop, _monitor, _thread
-    if loop and mon and thread and thread.is_alive():
-        status('stopping')
-        try:
-            future = asyncio.run_coroutine_threadsafe(mon.stop(), loop)
-            future.result(timeout=15)
+    # A previous stop must complete before start_monitoring is permitted to run.
+    with _control_lock:
+        _cancel_requested.set()
+        update(lambda d: d.update(monitoring_active=False))
+        with _lock:
+            loop, mon, thread = _loop, _monitor, _thread
+        if thread and thread.is_alive():
+            status('stopping')
+            if loop and mon and loop.is_running():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(mon.stop(), loop)
+                    future.result(timeout=15)
+                except Exception:
+                    log.exception('Monitor shutdown failed')
+                    status('error', 'Не удалось остановить монитор; проверьте логи')
+                    return False
+            # Covers a stop pressed while the worker is creating its loop.
             thread.join(timeout=15)
-        except Exception:
-            log.exception('Monitor shutdown failed')
-            status('error', 'Не удалось остановить монитор; проверьте логи')
-            return
-        if thread.is_alive():
-            status('error', 'Монитор не завершился за отведённое время')
-            return
-    status('stopped')
+            if thread.is_alive():
+                status('error', 'Монитор не завершился за отведённое время')
+                return False
+        status('stopped')
+        return True
+
+
+def restart_monitoring():
+    with _control_lock:
+        if stop_monitoring():
+            start_monitoring()
 
 
 def parse_group_list(raw):
@@ -196,7 +208,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Content-Type', '').split(';')[0] != 'application/x-www-form-urlencoded':
             self._respond(415, 'Неверный формат запроса')
             return
-        length = int(self.headers.get('Content-Length', '0'))
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            self._respond(400, 'Неверная длина запроса')
+            return
+        if length < 0:
+            self._respond(400, 'Неверная длина запроса')
+            return
         if length > 4096:
             self._respond(413, 'Слишком большой запрос')
             return
@@ -212,8 +231,11 @@ class Handler(BaseHTTPRequestHandler):
                 update(lambda d: d['keywords'].remove(kw) if kw in d['keywords'] else None)
             elif path == '/api/add_group':
                 group = value('group')[:150]
-                if group:
-                    update(lambda d: d['groups'].append(group) if group not in d['groups'] else None)
+                groups, invalid = parse_group_list(group)
+                if invalid or len(groups) != 1:
+                    self._respond(400, 'Укажите один корректный ID супергруппы или @username')
+                    return
+                update(lambda d: d['groups'].append(groups[0]) if groups[0] not in d['groups'] else None)
             elif path == '/api/add_groups_bulk':
                 groups, invalid = parse_group_list(value('groups_bulk'))
                 if invalid:
@@ -237,9 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/stop_monitoring':
                 stop_monitoring()
             elif path == '/api/restart_monitoring':
-                stop_monitoring()
-                if snapshot()['monitor'] == 'stopped':
-                    start_monitoring()
+                restart_monitoring()
             elif path == '/api/clear_alerts':
                 update(lambda d: d.update(alerts=[]))
             else:

@@ -94,7 +94,12 @@ class TelegramMonitor:
             for raw in self.groups:
                 target = int(raw) if raw.lstrip('-').isdigit() else raw
                 try:
-                    entity = await self.client.get_entity(target)
+                    try:
+                        entity = await self.client.get_entity(target)
+                    except (ValueError, TypeError):
+                        # For -100... IDs Telethon may lack an access_hash until dialogs are fetched.
+                        await self.client.get_dialogs()
+                        entity = await self.client.get_entity(target)
                     peer_id = utils.get_peer_id(entity)
                     resolved[peer_id] = getattr(entity, 'title', raw)
                     titles_by_input[raw] = resolved[peer_id]
@@ -154,7 +159,7 @@ class TelegramMonitor:
         self.counts['messages'] += 1
         self.last_message = datetime.now(timezone.utc).isoformat()
         text = normalized(original)
-        keyword = next((kw for kw in self.keywords if normalized(kw) in text), None)
+        keyword = next((kw for kw in self.keywords if normalized(kw) and normalized(kw) in text), None)
         if not keyword:
             return
         self.counts['matches'] += 1
