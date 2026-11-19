@@ -17,6 +17,9 @@ from telegram_monitor import TelegramMonitor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
+# Avoid logging Bot API URLs, which include the secret BOT_TOKEN.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 _lock = threading.RLock()
 _control_lock = threading.RLock()  # serialize start/stop/restart requests
@@ -33,6 +36,8 @@ def status(state, detail=''):
     with _lock:
         _state, _message = state, detail
     log.info('Monitor: %s %s', state, detail)
+    if state == 'running' and not _cancel_requested.is_set():
+        update(lambda d: d.update(monitoring_active=True))
 
 
 def snapshot():
@@ -61,6 +66,9 @@ def worker():
         log.exception('Telegram monitor failed')
         status('error', str(exc))
     finally:
+        # Failed/disconnected workers must never leave the persistent auto-start flag on.
+        # A deliberate user stop has already cleared it.
+        update(lambda d: d.update(monitoring_active=False))
         with _lock:
             _loop = None
             _monitor = None
@@ -78,7 +86,7 @@ def start_monitoring():
             return
         _cancel_requested.clear()
         status('starting')
-        update(lambda d: d.update(monitoring_active=True))
+        # Only mark persistent auto-start after Telethon reports 'running'.
         _thread = threading.Thread(target=worker, daemon=True, name='dashboat-monitor')
         _thread.start()
 
@@ -290,6 +298,21 @@ class Handler(BaseHTTPRequestHandler):
                          (f' <small>({esc(g)})</small>' if data['group_titles'].get(g, g) != g else '') + '</span>' +
                          action('/api/delete_group', '✕', 'danger', 'group', g) + '</div>'
                          for g in data['groups']) or '<p>— нет групп —</p>'
+        failed_groups = getattr(_monitor, 'failed_groups', {}) if _monitor else {}
+        resolved_ids = getattr(_monitor, 'resolved_inputs', set()) if _monitor else set()
+        connection_info = ('<p class="muted">Подключено: ' + str(len(resolved_ids)) +
+                           ' из ' + str(len(data['groups'])) + '</p>') if state == 'running' else ''
+        failed_html = ''.join('<div class="item"><span>⚠ ' + esc(g) +
+                              '</span><small>' + esc(reason) + '</small></div>'
+                              for g, reason in failed_groups.items())
+        if failed_html:
+            failed_html = '<h3>Недоступные группы</h3>' + failed_html
+        matches_html = ''.join('<div class="alert"><b>' + esc(m.get('timestamp','')) + '</b> ' +
+            ('<strong>ДУБЛЬ · уведомление не отправлено</strong>' if m.get('duplicate') else '<strong>Уведомление отправлено</strong>' if m.get('sent') else '<strong>Ошибка отправки</strong>') +
+            '<p>' + esc(m.get('keyword','')) + ' · ' + esc(m.get('group','')) + '</p>' +
+            ('<a target="_blank" rel="noopener noreferrer" href="' + esc(m.get('link','')) + '">Открыть объявление</a><p>' if m.get('link') else '<p>') +
+            '<small>' + esc(str(m.get('message',''))[:300]) + '</small></p></div>'
+            for m in reversed(data.get('matches_log', [])[-50:])) or '<p>Совпадений пока нет</p>'
         alerts = ''.join('<div class="alert"><b>' + esc(a.get('timestamp', '')) + '</b><p>' +
                          (f'<a target="_blank" rel="noopener noreferrer" href="{esc(a.get("link", ""))}">' if a.get('link') else '<span>') +
                          esc(str(a.get('keyword', '')).upper()) + ' → ' + esc(a.get('group', '')) +
@@ -320,7 +343,8 @@ input,textarea{{max-width:100%;box-sizing:border-box;padding:11px;border:1px sol
 <form method="POST" action="/api/add_groups_bulk">
 <textarea name="groups_bulk" rows="5" maxlength="3500" placeholder="Вставьте ID групп через пробел, запятую или с новой строки" required></textarea>
 <button class="btn" type="submit">ДОБАВИТЬ ВСЕ ГРУППЫ</button></form>
-<p class="muted">Повторяющиеся ID пропускаются. Уже сохранённые группы останутся. Чтобы применить новый список к Telegram, нажмите «ПЕРЕЗАПУСТИТЬ».</p>{groups}</div>
+<p class="muted">Повторяющиеся ID пропускаются. Уже сохранённые группы останутся. Чтобы применить новый список к Telegram, нажмите «ПЕРЕЗАПУСТИТЬ».</p>{connection_info}{failed_html}{groups}</div>
+<div class="section"><h2>Просмотр совпадений (включая дубли)</h2><p class="muted">Повторные публикации отображаются здесь, даже если уведомление было подавлено. Последние 50 записей.</p>{matches_html}</div>
 <div class="section"><h2>Последние алерты</h2>{action('/api/clear_alerts', 'ОЧИСТИТЬ АЛЕРТЫ', 'danger')}{alerts}</div>
 <p class="muted">Dashboat v3 · Панель обновляется раз в 20 секунд</p></body></html>'''
 

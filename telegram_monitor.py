@@ -42,7 +42,10 @@ def is_duplicate(data, text, group_id, now):
             continue
         remaining.append(item)
         if item.get('hash') == key:
-            matched = True
+            # Cross-group reposts are suppressed. Reposts in the same group
+            # can be notified again after 72h (with a different message ID).
+            if str(item.get('group')) != str(group_id) or now - float(item.get('at', 0)) < 72 * 3600:
+                matched = True
         # Conservative similarity across DIFFERENT groups only, same numeric values.
         elif (str(item.get('group')) != str(group_id) and len(comparable) >= 100
               and abs(len(comparable) - len(item.get('text', ''))) <= max(10, len(comparable) * .03)
@@ -64,6 +67,8 @@ class TelegramMonitor:
         self.bot = None
         self.group_titles = {}
         self.group_ids = set()
+        self.failed_groups = {}
+        self.resolved_inputs = set()
         self.group_public_names = {}
         self.stopping = False
         self.counts = {'messages': 0, 'matches': 0, 'sent': 0}
@@ -101,12 +106,14 @@ class TelegramMonitor:
                         await self.client.get_dialogs()
                         entity = await self.client.get_entity(target)
                     peer_id = utils.get_peer_id(entity)
+                    self.resolved_inputs.add(raw)
                     resolved[peer_id] = getattr(entity, 'title', raw)
                     titles_by_input[raw] = resolved[peer_id]
                     username = getattr(entity, 'username', None)
                     if username:
                         self.group_public_names[peer_id] = username
                 except Exception as exc:
+                    self.failed_groups[raw] = str(exc)[:250]
                     log.warning('Failed to resolve group %s: %s', raw, exc)
             if not resolved:
                 raise RuntimeError('Ни одна из заданных групп не доступна Telegram-аккаунту')
@@ -169,8 +176,6 @@ class TelegramMonitor:
             dup, key = is_duplicate(data, original, event.chat_id, now)
             return (dup, key)
         dup, key = update(reserve)
-        if dup:
-            return
         title = self.group_titles.get(event.chat_id, str(event.chat_id))
         username = self.group_public_names.get(event.chat_id)
         if username:
@@ -179,6 +184,19 @@ class TelegramMonitor:
             link = f'https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}'
         else:
             link = ''
+        def save_match(sent=False):
+            def record_match(data):
+                data.setdefault('matches_log', []).append({
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'keyword': keyword, 'group': title, 'group_id': str(event.chat_id),
+                    'message': original[:2000], 'link': link,
+                    'duplicate': dup, 'sent': sent,
+                })
+                data['matches_log'] = data['matches_log'][-300:]
+            update(record_match)
+        if dup:
+            save_match()
+            return
         out = (f'Найдено: {html.escape(title)}\n'
                f'Ключевое слово: <b>{html.escape(keyword.upper())}</b>\n\n'
                f'{html.escape(original[:800])}{"..." if len(original)>800 else ""}\n\n')
@@ -190,7 +208,9 @@ class TelegramMonitor:
             def rollback(data):
                 data['seen'] = [item for item in data['seen'] if not (item.get('hash') == key and item.get('at') == now)]
             update(rollback)
+            save_match()
             return
+        save_match(sent=True)
         self.counts['sent'] += 1
         def record(data):
             data['alerts'].append({'keyword': keyword, 'group': title, 'message': original,

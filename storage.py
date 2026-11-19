@@ -14,14 +14,14 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 
 def defaults():
     return {'keywords': [], 'groups': [], 'group_titles': {}, 'alerts': [],
-            'seen': [], 'monitoring_active': False}
+            'seen': [], 'matches_log': [], 'monitoring_active': False}
 
 
 def _clean(raw):
     data = defaults()
     if isinstance(raw, dict):
         data.update(raw)
-    for name in ('keywords', 'groups', 'alerts', 'seen'):
+    for name in ('keywords', 'groups', 'alerts', 'seen', 'matches_log'):
         if not isinstance(data[name], list):
             data[name] = []
     data['groups'] = [str(g).strip() for g in data['groups'] if str(g).strip()]
