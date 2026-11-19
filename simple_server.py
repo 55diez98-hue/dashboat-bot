@@ -162,6 +162,31 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != 'HEAD':
             self.wfile.write(raw)
 
+    def _respond_json(self, status_code, payload):
+        self._respond(status_code, json.dumps(payload, ensure_ascii=False),
+                      'application/json; charset=utf-8')
+
+    def _api_state(self):
+        data = read()
+        info = snapshot()
+        groups = [{
+            'id': str(group),
+            'title': str(data.get('group_titles', {}).get(str(group), group)),
+        } for group in data.get('groups', [])]
+        return {
+            'ok': True,
+            'data': {
+                'keywords': data.get('keywords', []),
+                'groups': groups,
+                'alerts': list(reversed(data.get('alerts', [])[-100:])),
+                'matches': list(reversed(data.get('matches_log', [])[-100:])),
+                'monitoring_active': bool(data.get('monitoring_active')),
+                'runtime': info,
+                'failed_groups': dict(getattr(_monitor, 'failed_groups', {})) if _monitor else {},
+                'connected_groups': len(getattr(_monitor, 'resolved_inputs', set())) if _monitor else 0,
+            },
+        }
+
     def _authorized(self):
         password = os.environ.get('ADMIN_PASSWORD', '')
         if not password:
@@ -192,6 +217,9 @@ class Handler(BaseHTTPRequestHandler):
             info = snapshot()
             ok = info['monitor'] == 'running' and info['connected']
             self._respond(200 if ok else 503, json.dumps(info, ensure_ascii=False), 'application/json; charset=utf-8')
+        elif path == '/api/v1/state':
+            if self._authorized():
+                self._respond_json(200, self._api_state())
         elif path == '/dashboard':
             if self._authorized():
                 self._respond(200, self.html())
@@ -202,6 +230,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path == '/api/v1/command':
+            self._handle_api_command()
+            return
         if not path.startswith('/api/'):
             self._respond(404, 'Не найдено')
             return
@@ -278,6 +309,74 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(500, 'Ошибка. Проверьте логи Render.')
             return
         self._respond(303, '', extra={'Location': '/dashboard'})
+
+    def _handle_api_command(self):
+        # Same cross-origin protection as the browser form routes. Native Android
+        # requests have no Origin header; those remain supported.
+        origin = self.headers.get('Origin')
+        if origin:
+            host = self.headers.get('Host', '')
+            parsed = urllib.parse.urlsplit(origin)
+            if parsed.netloc != host or parsed.scheme not in ('http', 'https'):
+                self._respond_json(403, {'ok': False, 'error': 'Cross-origin request denied'})
+                return
+        if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+            self._respond_json(415, {'ok': False, 'error': 'Content-Type must be application/json'})
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if length <= 0 or length > 16384:
+                self._respond_json(413, {'ok': False, 'error': 'Invalid request size'})
+                return
+            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+            if not isinstance(payload, dict):
+                raise ValueError('JSON object expected')
+            action = str(payload.get('action', '')).strip()
+            value = str(payload.get('value', '')).strip()
+            if action == 'start':
+                start_monitoring()
+            elif action == 'stop':
+                if not stop_monitoring():
+                    self._respond_json(409, {'ok': False, 'error': 'Monitor did not stop cleanly'})
+                    return
+            elif action == 'restart':
+                restart_monitoring()
+            elif action == 'add_keyword':
+                keyword = value.lower()[:100]
+                if not keyword:
+                    raise ValueError('Keyword is empty')
+                update(lambda d: d['keywords'].append(keyword) if keyword not in d['keywords'] else None)
+            elif action == 'delete_keyword':
+                update(lambda d: d['keywords'].remove(value) if value in d['keywords'] else None)
+            elif action == 'add_group':
+                groups, invalid = parse_group_list(value[:150])
+                if invalid or len(groups) != 1:
+                    raise ValueError('Specify one valid supergroup ID or @username')
+                update(lambda d: d['groups'].append(groups[0]) if groups[0] not in d['groups'] else None)
+            elif action == 'add_groups_bulk':
+                groups, invalid = parse_group_list(value)
+                if invalid or not groups:
+                    raise ValueError('Group list is empty or contains invalid IDs')
+                def add_all(data):
+                    existing = {str(g).lower() for g in data['groups']}
+                    for group in groups:
+                        if group.lower() not in existing:
+                            data['groups'].append(group)
+                            existing.add(group.lower())
+                update(add_all)
+            elif action == 'delete_group':
+                update(lambda d: d['groups'].remove(value) if value in d['groups'] else None)
+            elif action == 'clear_alerts':
+                update(lambda d: d.update(alerts=[]))
+            else:
+                self._respond_json(400, {'ok': False, 'error': 'Unknown action'})
+                return
+            self._respond_json(200, self._api_state())
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._respond_json(400, {'ok': False, 'error': str(exc)[:200]})
+        except Exception:
+            log.exception('Mobile API action failed')
+            self._respond_json(500, {'ok': False, 'error': 'Internal server error'})
 
     def html(self):
         data = read()

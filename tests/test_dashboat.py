@@ -4,6 +4,7 @@ Telegram dependencies are stubbed so this suite works without a live account.
 import base64
 import http.client
 import importlib
+import json
 import os
 import pathlib
 import sys
@@ -141,3 +142,75 @@ class DashboatTests(unittest.TestCase):
         self.assertEqual(server._state,'error')
 
 if __name__=='__main__':unittest.main()
+
+class MobileAPIIntegrationTests(unittest.TestCase):
+    """Exercise the same HTTP routes/JSON fields that the Android APK uses."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.oldpath, self.olddb = storage.DATA_FILE, storage.DATABASE_URL
+        storage.DATA_FILE = pathlib.Path(self.tmp.name) / 'state.json'
+        storage.DATABASE_URL = ''
+        self.env = patch.dict(os.environ, {'ADMIN_PASSWORD': 'unit-test-secret'})
+        self.env.start()
+        self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.auth = 'Basic ' + base64.b64encode(b'admin:unit-test-secret').decode()
+    def tearDown(self):
+        self.httpd.shutdown(); self.httpd.server_close(); self.thread.join(timeout=2)
+        self.env.stop()
+        storage.DATA_FILE, storage.DATABASE_URL = self.oldpath, self.olddb
+        self.tmp.cleanup()
+    def call(self, method, path, payload=None, auth=True, extra_headers=None):
+        headers = dict(extra_headers or {})
+        if auth: headers['Authorization'] = self.auth
+        if payload is not None:
+            headers['Content-Type'] = 'application/json; charset=utf-8'
+            body = json.dumps(payload).encode('utf-8')
+        else: body = None
+        conn = http.client.HTTPConnection('127.0.0.1', self.httpd.server_port, timeout=4)
+        conn.request(method, path, body=body, headers=headers)
+        res=conn.getresponse(); result=(res.status, res.read(), dict(res.getheaders()))
+        conn.close(); return result
+    def test_android_state_authorized_shape(self):
+        code, body, _ = self.call('GET','/api/v1/state')
+        self.assertEqual(code,200)
+        obj=json.loads(body)
+        self.assertTrue(obj['ok'])
+        for key in ('keywords','groups','alerts','matches','monitoring_active','runtime','failed_groups','connected_groups'):
+            self.assertIn(key,obj['data'])
+        for key in ('monitor','detail','counts','connected','last_message'):
+            self.assertIn(key,obj['data']['runtime'])
+    def test_android_auth_required(self):
+        self.assertEqual(self.call('GET','/api/v1/state',auth=False)[0],401)
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'add_keyword','value':'Bike'},auth=False)[0],401)
+        self.assertEqual(storage.read()['keywords'],[])
+    def test_android_web_shared_state(self):
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'add_keyword','value':'Велосипед'})[0],200)
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'add_groups_bulk','value':'-1001635935081 -1001635935081, -1001993420914'})[0],200)
+        self.assertEqual(storage.read()['keywords'],['велосипед'])
+        self.assertEqual(len(storage.read()['groups']),2)
+        data=json.loads(self.call('GET','/api/v1/state')[1])['data']
+        self.assertEqual(data['keywords'],['велосипед'])
+        self.assertEqual([g['id'] for g in data['groups']],['-1001635935081','-1001993420914'])
+        # Browser page is fed by the same stored state.
+        html=self.call('GET','/dashboard')[1].decode()
+        self.assertIn('ВЕЛОСИПЕД',html)
+        self.assertIn('-1001635935081',html)
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'delete_keyword','value':'велосипед'})[0],200)
+        self.assertEqual(storage.read()['keywords'],[])
+    def test_json_error_and_csrf(self):
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'unknown'})[0],400)
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'add_keyword','value':'bike'},extra_headers={'Origin':'https://attacker.invalid'})[0],403)
+        self.assertEqual(storage.read()['keywords'],[])
+        self.assertEqual(self.call('POST','/api/v1/command',{'action':'add_groups_bulk','value':'bad-data'})[0],400)
+    def test_monitoring_commands_same_functions(self):
+        with patch.object(server,'start_monitoring') as start, patch.object(server,'stop_monitoring',return_value=True) as stop, patch.object(server,'restart_monitoring') as restart:
+            self.assertEqual(self.call('POST','/api/v1/command',{'action':'start'})[0],200)
+            self.assertEqual(self.call('POST','/api/v1/command',{'action':'stop'})[0],200)
+            self.assertEqual(self.call('POST','/api/v1/command',{'action':'restart'})[0],200)
+            start.assert_called_once();stop.assert_called_once();restart.assert_called_once()
+    def test_public_uptimerobot_and_no_api_leak(self):
+        self.assertEqual(self.call('HEAD','/')[0],200)
+        self.assertEqual(self.call('GET','/ping')[0],200)
+        self.assertEqual(self.call('GET','/api/v1/state',auth=False)[0],401)
